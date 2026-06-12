@@ -1,0 +1,204 @@
+#!/usr/bin/env bash
+# sentinel — 24/7 specialized agents (code review, docs-sync, agentic QA).
+# Heartbeat: `sentinel tick` (run by launchd). See docs/DESIGN.md.
+set -uo pipefail
+SENTINEL_HOME="${SENTINEL_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+export SENTINEL_HOME
+# shellcheck source=../lib/common.sh
+. "$SENTINEL_HOME/lib/common.sh"
+
+AGENTS_DIR="$SENTINEL_HOME/agents"
+VALID_AGENTS="review docs-sync qa"
+
+# Run one agent against one target. Always runs (cadence is checked by `tick`, not here).
+dispatch_run(){
+  local t="$1" a="$2"
+  t_exists "$t" || die "unknown target '$t' (try: sentinel targets)"
+  case " $VALID_AGENTS " in *" $a "*) :;; *) die "unknown agent '$a' (one of: $VALID_AGENTS)";; esac
+  [ -f "$AGENTS_DIR/$a.sh" ] || die "missing agent script: $AGENTS_DIR/$a.sh"
+
+  local path github base ai id rd
+  path="$(t_field "$t" path)"; github="$(t_field "$t" github)"; base="$(t_field "$t" base)"; ai="$(t_field "$t" ai_allowed)"
+  [ -n "$path" ] || die "target '$t' has no path"
+  id="$(ts)-$RANDOM"; rd="$RUNS/$id"; mkdir -p "$rd/artifacts"
+  jq -n --arg id "$id" --arg t "$t" --arg a "$a" --arg dry "$DRY_RUN" \
+    '{id:$id,target:$t,agent:$a,dry:$dry,state:"running",created:(now|todate)}' > "$rd/meta.json"
+  : > "$rd/run.log"
+
+  log "▶ $t/$a  (run $id)"
+  RUN_ID="$id" RUN_DIR="$rd" TARGET="$t" TARGET_PATH="$path" TARGET_GITHUB="$github" \
+  TARGET_BASE="$base" AI_ALLOWED="$ai" SENTINEL_HOME="$SENTINEL_HOME" \
+    run_to "$RUN_WALL_TIMEOUT" bash "$AGENTS_DIR/$a.sh" >>"$rd/run.log" 2>&1
+  local rc=$?
+
+  # Read the agent's structured result (only if it parses cleanly).
+  local verdict summary findings cost skipped sha
+  if [ -f "$rd/result.json" ] && jq -e . "$rd/result.json" >/dev/null 2>&1; then
+    verdict="$(jq -r '.verdict // "unknown"' "$rd/result.json")"
+    summary="$(jq -r '.summary // ""' "$rd/result.json")"
+    findings="$(jq -r '.findings // 0' "$rd/result.json")"
+    cost="$(jq -r '.cost // ""' "$rd/result.json")"
+    skipped="$(jq -r '.skipped // false' "$rd/result.json")"
+    sha="$(jq -r '.sha // ""' "$rd/result.json")"
+  else
+    verdict="error"; summary="agent produced no result.json (rc=$rc) — see run.log"; findings=0; cost=""; skipped=false; sha=""
+  fi
+  [ "$rc" = 124 ] && { verdict="timeout"; summary="hit RUN_WALL_TIMEOUT (${RUN_WALL_TIMEOUT}s)"; }
+
+  meta_set "$rd" state done verdict "$verdict" summary "$summary" findings "$findings" cost "$cost" ended "$(date +%s)"
+  [ -f "$rd/report.md" ] && cp "$rd/report.md" "$REPORTS/${t}__${a}.md"
+
+  # Update cadence state (centralised here so agents stay simple).
+  [ -z "$sha" ] && sha="$(git_head "$path")"
+  state_set "$t" "$a" lastRunEpoch "$(date +%s)" lastRunSha "$sha" lastVerdict "$verdict" lastRun "$id"
+
+  local emoji="✅"; case "$verdict" in fail|error|timeout) emoji="❌";; warn|issues) emoji="⚠️";; skipped) emoji="⏭️";; esac
+  log "$emoji $t/$a → $verdict  ${findings:+(${findings} findings) }${cost:+\$$cost }$id"
+  [ "$skipped" = true ] || notify "sentinel $a: $t → $verdict" "${summary:0:240}${findings:+ • ${findings} findings}${cost:+ • \$$cost}"
+}
+
+cmd_tick(){
+  lock_acquire tick || { log "another tick is running; skipping"; exit 0; }
+  trap 'lock_release tick' EXIT INT TERM
+  log "== sentinel tick $(date) =="
+  local t a cad path due reason planned=0
+  for t in $(t_keys); do
+    path="$(t_field "$t" path)"
+    for a in $(t_agents "$t"); do
+      t_agent_enabled "$t" "$a" || continue
+      cad="$(t_agent "$t" "$a" cadence)"; [ -n "$cad" ] || cad="on-commit"
+      read -r due reason <<<"$(cadence_due "$t" "$a" "$cad" "$path")"
+      if [ "$due" = yes ]; then
+        log "  due: $t/$a ($cad → $reason)"
+        [ "$DRY_RUN" = 1 ] || dispatch_run "$t" "$a"
+        planned=$((planned+1))
+      else
+        log "  skip: $t/$a ($cad → $reason)"
+      fi
+    done
+  done
+  log "== tick done: $planned agent run(s)$([ "$DRY_RUN" = 1 ] && printf ' [dry]') =="
+}
+
+cmd_run(){
+  local t="${1:-}" a="${2:-}"
+  { [ -n "$t" ] && [ -n "$a" ]; } || die "usage: sentinel run <target> <agent>   (agent: $VALID_AGENTS)"
+  dispatch_run "$t" "$a"
+}
+
+cmd_status(){
+  printf "%-22s %-16s %-10s %-9s %-7s %s\n" RUN TARGET AGENT VERDICT FIND COST
+  local d m
+  for d in $(ls -1 "$RUNS" 2>/dev/null | sort -r | head -25); do
+    m="$RUNS/$d/meta.json"; [ -f "$m" ] || continue
+    printf "%-22s %-16s %-10s %-9s %-7s %s\n" \
+      "$(jq -r .id "$m")" "$(jq -r .target "$m")" "$(jq -r .agent "$m")" \
+      "$(jq -r '.verdict // .state' "$m")" "$(jq -r '.findings // "-"' "$m")" "$(jq -r '.cost // "-"' "$m")"
+  done
+}
+
+cmd_logs(){ local id="${1:-}"; [ -n "$id" ] || die "usage: sentinel logs <run-id> [lines]"; tail -n "${2:-200}" "$RUNS/$id/run.log" 2>/dev/null || die "no log for $id"; }
+
+cmd_report(){
+  local t="${1:-}" a="${2:-}"
+  if [ -n "$t" ] && [ -n "$a" ]; then cat "$REPORTS/${t}__${a}.md" 2>/dev/null || die "no report yet for $t/$a"; return; fi
+  ls -1t "$REPORTS"/*.md 2>/dev/null | sed "s#$REPORTS/##; s/__/  →  /; s/\.md\$//" || echo "no reports yet"
+}
+
+cmd_targets(){
+  local t a cad en path due reason
+  for t in $(t_keys); do
+    path="$(t_field "$t" path)"
+    printf "${c_grn}%s${c_off}  %s  ${c_dim}(base:%s ai:%s)${c_off}\n" "$t" "$path" "$(t_field "$t" base)" "$(t_field "$t" ai_allowed)"
+    for a in $(t_agents "$t"); do
+      if t_agent_enabled "$t" "$a"; then en=on; else en=off; fi
+      cad="$(t_agent "$t" "$a" cadence)"
+      read -r due reason <<<"$(cadence_due "$t" "$a" "$cad" "$path")"
+      printf "    %-10s %-5s %-12s ${c_dim}%s → %s${c_off}\n" "$a" "[$en]" "$cad" "$due" "$reason"
+    done
+  done
+}
+
+cmd_add_target(){ # add-target <key> <local-path> [base]
+  local key="${1:-}" src="${2:-}" base="${3:-}"
+  { [ -n "$key" ] && [ -n "$src" ]; } || die "usage: sentinel add-target <key> <local-path> [base-branch]"
+  t_exists "$key" && die "target '$key' already exists — edit config/targets.json"
+  local path; path="${src/#\~/$HOME}"
+  [ -d "$path" ] || die "not a directory: $path"
+  local gh="" qa_block=""
+  if [ -d "$path/.git" ]; then
+    gh="$(git -C "$path" remote get-url origin 2>/dev/null | sed -E 's#^(git@github.com:|https?://github.com/)##; s#\.git$##')"
+    [ -z "$base" ] && base="$(git -C "$path" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  fi
+  [ -z "$base" ] && base="main"
+  local tmp; tmp="$(mktemp)"
+  jq --arg k "$key" --arg p "$path" --arg gh "$gh" --arg b "$base" \
+    '.targets[$k]={path:$p,github:$gh,base:$b,ai_allowed:true,agents:{review:{enabled:true,cadence:"on-commit"},"docs-sync":{enabled:false,cadence:"on-commit"}}}' \
+    "$TARGETS_JSON" > "$tmp" && mv "$tmp" "$TARGETS_JSON" || die "failed to write registry"
+  echo "added target '$key':"; jq --arg k "$key" '.targets[$k]' "$TARGETS_JSON"
+  echo; echo "review is on by default. Enable docs-sync, or add a qa app block, by editing config/targets.json."
+}
+
+cmd_install(){ # write + load the launchd scheduler
+  local plist="$HOME/Library/LaunchAgents/com.sentinel.scheduler.plist"
+  mkdir -p "$HOME/Library/LaunchAgents"
+  # Literal substitution (robust to '#', '&', '/' in PATH/HOME — sed is not).
+  S_HOME="$SENTINEL_HOME" S_INT="$SCHEDULER_INTERVAL" S_PATH="$PATH" \
+  python3 - "$SENTINEL_HOME/launchd/com.sentinel.scheduler.plist" "$plist" <<'PY'
+import os, sys
+src, dst = sys.argv[1], sys.argv[2]
+t = open(src).read()
+t = t.replace('__SENTINEL_HOME__', os.environ['S_HOME']).replace('__INTERVAL__', os.environ['S_INT']).replace('__PATH__', os.environ['S_PATH'])
+open(dst, 'w').write(t)
+PY
+  launchctl unload "$plist" 2>/dev/null || true
+  launchctl load "$plist" && echo "loaded scheduler: ticks every ${SCHEDULER_INTERVAL}s → $VAR/scheduler.log" || die "launchctl load failed"
+}
+cmd_uninstall(){
+  local plist="$HOME/Library/LaunchAgents/com.sentinel.scheduler.plist"
+  launchctl unload "$plist" 2>/dev/null && echo "scheduler unloaded" || echo "scheduler was not loaded"
+}
+
+cmd_doctor(){
+  echo "== sentinel doctor =="
+  echo "SENTINEL_HOME: $SENTINEL_HOME"
+  local x; for x in jq git gh node claude codex pi curl lsof gtimeout caffeinate; do
+    if have "$x"; then printf "  [ok]  %s\n" "$x"; else printf "  [--]  %s (missing)\n" "$x"; fi
+  done
+  local pw; pw="$(NODE_PATH="$SENTINEL_HOME/node_modules" node -e "require.resolve('playwright');console.log(require('playwright/package.json').version)" 2>/dev/null)"
+  echo "  playwright: ${pw:-NOT resolvable (cd ~/sentinel && npm install)}"
+  echo "targets.json: $(jq -e . "$TARGETS_JSON" >/dev/null 2>&1 && echo valid || echo INVALID)"
+  echo "ntfy topic:   $([ -n "$NTFY_TOPIC" ] && echo "set (${#NTFY_TOPIC} chars)" || echo "UNSET")"
+  echo "timeout bin:  ${TIMEOUT_BIN:-NONE (brew install coreutils)}"
+  echo "pi default:   provider=$QA_PROVIDER model=$QA_MODEL"
+  echo "scheduler:    $(launchctl list 2>/dev/null | grep -q com.sentinel.scheduler && echo "loaded" || echo "not loaded (sentinel install)")"
+  if have gh; then echo "gh auth:      $(gh auth status >/dev/null 2>&1 && echo ok || echo "not logged in (PR/comment modes need it)")"; fi
+}
+
+usage(){ cat <<EOF
+sentinel — 24/7 specialized agents
+  sentinel tick                 evaluate cadences and run any due agents (launchd heartbeat)
+  sentinel run <target> <agent> run one agent now  (agent: $VALID_AGENTS)
+  sentinel status               recent runs
+  sentinel logs <run-id> [n]    tail a run log
+  sentinel report [t] [agent]   show latest report(s)
+  sentinel targets              registry + what's due
+  sentinel add-target <k> <path> [base]
+  sentinel install | uninstall  load/unload the launchd scheduler
+  sentinel doctor               environment + dependency check
+EOF
+}
+
+case "${1:-}" in
+  tick)       shift; cmd_tick "$@";;
+  run)        shift; cmd_run "$@";;
+  status)     cmd_status;;
+  logs)       shift; cmd_logs "$@";;
+  report)     shift; cmd_report "$@";;
+  targets)    cmd_targets;;
+  add-target) shift; cmd_add_target "$@";;
+  install)    cmd_install;;
+  uninstall)  cmd_uninstall;;
+  doctor)     cmd_doctor;;
+  *)          usage;;
+esac

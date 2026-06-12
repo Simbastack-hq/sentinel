@@ -1,0 +1,9 @@
+{
+  "name": "sentinel",
+  "version": "1.0.0",
+  "private": true,
+  "description": "24/7 specialized agents: code review, docs-sync, and agentic QA (Mimo + Playwright)",
+  "bin": { "sentinel": "bin/sentinel" },
+  "dependencies": { "playwright": "1.60.0" },
+  "_note": "Self-contained. Playwright is installed here (chromium reuses the shared ms-playwright cache); the v2 QA extension keeps its own copy under pi-ext/qa-browser/. If playwright is missing: cd ~/sentinel && npm install."
+}

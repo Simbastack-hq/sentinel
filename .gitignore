@@ -1,0 +1,9 @@
+# runtime + secrets — never commit
+var/
+config/sentinel.env
+config/targets.json
+node_modules/
+.DS_Store
+*.log
+reports/*.md
+!reports/.gitkeep

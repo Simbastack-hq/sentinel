@@ -1,0 +1,60 @@
+{
+  "_comment": "Target registry. Copy to config/targets.json (gitignored) and add YOUR repos. Each target has agents (review | docs-sync | qa); cadence is 'on-commit' or 'every:<dur>' (e.g. every:12h). ai_allowed gates sending a repo's code/DOM/diff to external models — set it deliberately for proprietary code.",
+  "targets": {
+
+    "_example_simple_webapp": {
+      "path": "/Users/you/projects/my-simple-app",
+      "github": "",
+      "base": "main",
+      "ai_allowed": true,
+      "agents": {
+        "qa": {
+          "enabled": true,
+          "cadence": "every:12h",
+          "app": {
+            "engine": "pi-native",
+            "start_cmd": "node server.js",
+            "port": 3000,
+            "health_path": "/",
+            "boot_timeout": 60,
+            "max_steps": 10,
+            "goal": "Describe what to exercise: upload a photo, submit a search, verify results render without JS errors, check empty/error states."
+          }
+        },
+        "review": { "enabled": true, "cadence": "on-commit" },
+        "docs-sync": { "enabled": false, "cadence": "on-commit" }
+      }
+    },
+
+    "_example_fullstack_flow_engine": {
+      "path": "/Users/you/projects/my-pms",
+      "github": "your-org/my-pms",
+      "base": "dev",
+      "ai_allowed": true,
+      "agents": {
+        "qa": {
+          "enabled": true,
+          "cadence": "every:12h",
+          "app": {
+            "engine": "flow",
+            "start_cmd": "pnpm dev",
+            "set_port": false,
+            "port": 3000,
+            "aux_ports": [4000],
+            "host": "localhost",
+            "api_base": "http://localhost:4000",
+            "boot_timeout": 120,
+            "uiux_review": true,
+            "login": {
+              "path": "/login",
+              "email_env": "MYAPP_QA_EMAIL",
+              "password_env": "MYAPP_QA_PASSWORD"
+            }
+          }
+        },
+        "review": { "enabled": false, "cadence": "on-commit" }
+      }
+    }
+
+  }
+}
