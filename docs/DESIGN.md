@@ -1,8 +1,8 @@
 # Sentinel — Design & How It Works
 
 Sentinel is a set of long-running, **specialized** agents that each do one job unattended on a schedule:
-code **review**, **docs-sync**, and **QA**. It is self-contained — no external project dependencies, only
-the CLIs it shells out to (`pi`/Mimo, `claude`, `codex`, `gh`, Playwright).
+code **review**, **docs-sync**, **QA**, and **brain-sync**. It is self-contained — no external project
+dependencies, only the CLIs it shells out to (`pi`/Mimo, `claude`, `codex`, `gh`, Playwright).
 
 ## 1. The heartbeat
 
@@ -29,6 +29,8 @@ launchd ──(every SCHEDULER_INTERVAL, default 900s)──▶ sentinel tick
 
 **Cadence:** `on-commit` compares `git HEAD` to the stored `lastRunSha`; `every:<dur>` compares `now − lastRunEpoch`. State in `var/state/` survives reboots.
 
+**The `advance` field:** `result.json` may carry `advance` (default `1`). `lastRunEpoch` always advances (it's the `every:<dur>` wall-clock timer), but the diff baseline `lastRunSha` advances only when `advance != 0`. An agent emits `advance=0` to **hold** the baseline so a failed window is retried next tick instead of silently skipped. Only brain-sync (a stateful system-of-record) uses it today; review/docs-sync/qa omit it and default to `1`, so their behavior is unchanged.
+
 ## 2. review
 
 Computes the diff since the last reviewed SHA (first run: last `REVIEW_LOOKBACK` commits, or the root commit on shallow repos — using `git rev-parse --verify -q` so a missing `HEAD~N` fails cleanly). The diff is embedded in a prompt (truncated to `MAX_REVIEW_DIFF_CHARS`) and sent to a read-only engine — **Mimo** by default (`pi`, fast/cheap), or `codex`/`claude`. The model ends with a `SENTINEL_VERDICT`/`SENTINEL_FINDINGS` footer that's parsed. Bounded by `REVIEW_TIMEOUT` so a stalled call can't jam the scheduler. Never writes; optional PR comment.
@@ -36,6 +38,19 @@ Computes the diff since the last reviewed SHA (first run: last `REVIEW_LOOKBACK`
 ## 3. docs-sync
 
 Creates a throwaway `git worktree` at HEAD, runs `claude` scoped to edit only Markdown, then **hard-guards the result**: every changed path must match a doc allow-list (`*.md`, `docs/**`, `README*`, …) and must not match a code/config denylist — one offending file and **all changes are discarded** (`git reset --hard`). If only docs changed it emits a patch (default) or opens a PR; it **never auto-merges** and never touches the real working tree.
+
+## 3b. brain-sync
+
+docs-sync's **cross-repo** sibling: it reads a SOURCE repo's diff but writes into a SEPARATE shared knowledge repo (Simbastack-hq/simbastack-brain). The brain location is **global** config (`BRAIN_PATH`/`BRAIN_GITHUB`/`BRAIN_BASE`) — one sink for the whole fleet — so a target only flips `brain-sync: { enabled, cadence }` on.
+
+Pipeline per run:
+1. **Source diff** since `lastRunSha` — the exact baseline mechanism review uses (`cat-file -e` reachability check, `HEAD~REVIEW_LOOKBACK`/root-commit fallbacks), read-only on the source.
+2. **Substance gate** (deterministic, pre-LLM): drop lockfile/generated/`dist/` noise; if a window has fewer than `BRAIN_MIN_DIFF_LINES` real changed lines, skip the model call and the PR. Oversized (`> MAX_BRAIN_DIFF_CHARS`) windows fall back to a `--stat` + `git log --oneline` summary so the window is **recorded, never silently dropped**.
+3. **Brain-repo lock + worktree:** all brain git ops serialize under `lock_acquire brain-repo` (the tick lock doesn't cover manual `sentinel run`, and every target funnels through one repo). It `worktree prune`s, refuses a mid-rebase/merge base, asserts the clone's `origin` matches `BRAIN_GITHUB`, then branches `sentinel/brain/<run>` from the freshest `origin/$BRAIN_BASE`.
+4. **Distill:** `claude` runs with cwd = the brain worktree, `--allowedTools "Edit,Write,Read"` and `--disallowedTools "Bash,WebFetch,WebSearch"` (no egress/exfil), given the source diff + the **current** content of `30-engineering/repos/<slug>.md` and an **append-only dated-bullet** format keyed by the source commit SHA7 — so re-runs converge instead of churning.
+5. **Two guards, two axes.** A **path guard** (exact-equality allow-list of one file — not prefix/substring-bypassable) controls *which* file may change; a **content guard** (secret-regex scan of the staged diff) controls *what* may reach the shared repo + PR body. Either violation → `git reset --hard` + `clean -fd`, discard everything, and the patch is wiped on a secret hit.
+6. **PR** (gated by `ENABLE_BRAIN_PR`) on simbastack-brain — **never auto-merged**. Push/PR failure deletes any orphaned remote branch.
+7. **Baseline discipline:** every failure path emits `advance=0` (hold `lastRunSha`, retry the window); genuine no-ops and real PRs emit `advance=1`. A window of engineering knowledge is never silently lost.
 
 ## 4. qa — three engines
 
@@ -90,11 +105,13 @@ render-report.js  →  one combined report.html (flows, FE+BE bugs, UI/UX, links
 | QA decisions, flow derivation, review | **Mimo `mimo-v2.5-pro`** (`pi`, provider `xiaomi`) — fast, cheap |
 | Vision (UI/UX review) | **`mimo-v2-omni`** (Xiaomi API direct) |
 | docs-sync edits | **claude** (reliable surgical Markdown edits in a worktree) |
+| brain-sync distillation | **claude** (surgical single-file edits in a brain worktree, Bash disallowed) |
 | review (optional, deeper) | **codex `gpt-5.5`** read-only sandbox |
 
 ## 7. Safety
 
 - LLMs only ever receive browser/API tools — no shell/filesystem access. review uses a read-only sandbox; docs-sync is worktree-isolated + docs-only-guarded with no auto-merge.
+- brain-sync is worktree-isolated on the **brain** repo (a *different* repo than the one whose cadence fired) under a dedicated brain-repo lock, guarded by **path** (single per-repo file) **and content** (secret scan) with no auto-merge; the global `BRAIN_PATH`/`ENABLE_BRAIN_PR` gate it, and a failed window holds the diff baseline so nothing is silently lost.
 - `ai_allowed` per target gates external-model egress. Proprietary repos are added deliberately.
 - qa boots on localhost, tears down the full process tree, and reaps ports/orphans on every exit path.
 - Per-run wall timeout, per-call timeouts, single-flight tick lock, and lock-age reclaim keep a stuck agent from blocking the fleet. Notifications are summaries only.

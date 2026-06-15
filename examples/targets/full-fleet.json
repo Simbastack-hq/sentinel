@@ -1,0 +1,38 @@
+{
+  "_comment": "The realistic 'watch everything' setup: one target running all four agents. review on every commit, docs-sync + brain-sync on a daily digest, qa flow-engine twice a day. brain-sync also needs BRAIN_PATH + ENABLE_BRAIN_PR in config/sentinel.env. Copy to config/targets.json and adjust; duplicate the target block per repo.",
+  "targets": {
+    "my-product": {
+      "path": "/Users/you/projects/my-product",
+      "github": "your-org/my-product",
+      "base": "dev",
+      "ai_allowed": true,
+      "agents": {
+        "review":    { "enabled": true,  "cadence": "on-commit" },
+        "docs-sync": { "enabled": true,  "cadence": "every:24h" },
+        "brain-sync":{ "enabled": true,  "cadence": "every:24h" },
+        "qa": {
+          "enabled": true,
+          "cadence": "every:12h",
+          "app": {
+            "engine": "flow",
+            "start_cmd": "pnpm dev",
+            "set_port": false,
+            "port": 3000,
+            "aux_ports": [4000],
+            "host": "localhost",
+            "api_base": "http://localhost:4000",
+            "health_path": "/login",
+            "boot_timeout": 120,
+            "uiux_review": true,
+            "login": {
+              "path": "/login",
+              "email_env": "MYPRODUCT_QA_EMAIL",
+              "password_env": "MYPRODUCT_QA_PASSWORD"
+            },
+            "goal": "Exercise the core operator screens behind the login on a TEST tenant; verify FE renders and the backend persists what the UI shows. Do NOT wipe data."
+          }
+        }
+      }
+    }
+  }
+}

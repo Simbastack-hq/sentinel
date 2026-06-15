@@ -34,6 +34,8 @@ mkdir -p "$RUNS" "$STATE" "$LOCKS" "$REPORTS"
 : "${RUN_WALL_TIMEOUT:=3600}"; : "${CMD_TIMEOUT:=900}"; : "${MAX_REVIEW_DIFF_CHARS:=40000}"
 : "${REVIEW_ENGINE:=pi}"; : "${REVIEW_THINKING:=low}"; : "${REVIEW_LOOKBACK:=6}"; : "${REVIEW_TIMEOUT:=240}"; : "${CODEX_MODEL:=gpt-5.5}"; : "${ENABLE_REVIEW_PR_COMMENT:=0}"
 : "${DOCS_ENGINE:=claude}"; : "${CLAUDE_PERMISSION_MODE:=acceptEdits}"; : "${ENABLE_DOCS_PR:=0}"
+: "${BRAIN_PATH:=}"; : "${BRAIN_GITHUB:=Simbastack-hq/simbastack-brain}"; : "${BRAIN_BASE:=main}"; : "${ENABLE_BRAIN_PR:=0}"
+: "${MAX_BRAIN_DIFF_CHARS:=80000}"; : "${BRAIN_MIN_DIFF_LINES:=8}"
 : "${QA_PROVIDER:=xiaomi}"; : "${QA_MODEL:=mimo-v2.5-pro}"; : "${QA_THINKING:=medium}"; : "${QA_HEADLESS:=1}"; : "${QA_ENGINE:=node-loop}"
 : "${DRY_RUN:=0}"
 

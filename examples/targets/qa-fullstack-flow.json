@@ -1,0 +1,36 @@
+{
+  "_comment": "qa with the FLOW engine: autonomous, codebase-aware, deep FE+BE testing of a web+API stack behind a login. recon reads the repo, Mimo derives the real business flows, then drives the UI AND asserts the backend via authenticated api_request. set_port:false for multi-process stacks; aux_ports waits for the API. Login creds live ONLY in config/sentinel.env keyed by email_env/password_env. Copy to config/targets.json and adjust.",
+  "targets": {
+    "my-pms": {
+      "path": "/Users/you/projects/my-pms",
+      "github": "your-org/my-pms",
+      "base": "dev",
+      "ai_allowed": true,
+      "agents": {
+        "qa": {
+          "enabled": true,
+          "cadence": "every:12h",
+          "app": {
+            "engine": "flow",
+            "start_cmd": "pnpm dev",
+            "set_port": false,
+            "port": 3000,
+            "aux_ports": [4000],
+            "host": "localhost",
+            "api_base": "http://localhost:4000",
+            "health_path": "/login",
+            "boot_timeout": 120,
+            "uiux_review": true,
+            "login": {
+              "path": "/login",
+              "email_env": "MYPMS_QA_EMAIL",
+              "password_env": "MYPMS_QA_PASSWORD"
+            },
+            "goal": "Logged in as an admin for a TEST tenant (disposable data), exercise the core operator screens reachable from the dashboard. Verify pages load and render data without JS errors, lists/tables populate, filters and detail/edit views open, and the backend persists what the UI shows. Prefer viewing/navigating; you may open create/edit forms, but do NOT bulk-delete or wipe data."
+          }
+        },
+        "review": { "enabled": false, "cadence": "on-commit" }
+      }
+    }
+  }
+}

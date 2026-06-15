@@ -8,7 +8,7 @@ export SENTINEL_HOME
 . "$SENTINEL_HOME/lib/common.sh"
 
 AGENTS_DIR="$SENTINEL_HOME/agents"
-VALID_AGENTS="review docs-sync qa"
+VALID_AGENTS="review docs-sync qa brain-sync"
 
 # Run one agent against one target. Always runs (cadence is checked by `tick`, not here).
 dispatch_run(){
@@ -32,7 +32,7 @@ dispatch_run(){
   local rc=$?
 
   # Read the agent's structured result (only if it parses cleanly).
-  local verdict summary findings cost skipped sha
+  local verdict summary findings cost skipped sha advance
   if [ -f "$rd/result.json" ] && jq -e . "$rd/result.json" >/dev/null 2>&1; then
     verdict="$(jq -r '.verdict // "unknown"' "$rd/result.json")"
     summary="$(jq -r '.summary // ""' "$rd/result.json")"
@@ -40,17 +40,29 @@ dispatch_run(){
     cost="$(jq -r '.cost // ""' "$rd/result.json")"
     skipped="$(jq -r '.skipped // false' "$rd/result.json")"
     sha="$(jq -r '.sha // ""' "$rd/result.json")"
+    advance="$(jq -r '.advance // 1' "$rd/result.json")"   # 0 ⇒ agent asks to HOLD the diff baseline (retry this window)
   else
+    # A crash with no result.json means we can't tell whether the window was processed. For brain-sync
+    # (a stateful system-of-record) HOLD the baseline so the window is retried; review/docs-sync/qa are
+    # idempotent re-runs and keep advancing (preserving their pre-existing behavior exactly).
     verdict="error"; summary="agent produced no result.json (rc=$rc) — see run.log"; findings=0; cost=""; skipped=false; sha=""
+    if [ "$a" = brain-sync ]; then advance=0; else advance=1; fi
   fi
-  [ "$rc" = 124 ] && { verdict="timeout"; summary="hit RUN_WALL_TIMEOUT (${RUN_WALL_TIMEOUT}s)"; }
+  [ "$rc" = 124 ] && { verdict="timeout"; summary="hit RUN_WALL_TIMEOUT (${RUN_WALL_TIMEOUT}s)"; [ "$a" = brain-sync ] && advance=0; }
 
   meta_set "$rd" state done verdict "$verdict" summary "$summary" findings "$findings" cost "$cost" ended "$(date +%s)"
   [ -f "$rd/report.md" ] && cp "$rd/report.md" "$REPORTS/${t}__${a}.md"
 
   # Update cadence state (centralised here so agents stay simple).
-  [ -z "$sha" ] && sha="$(git_head "$path")"
-  state_set "$t" "$a" lastRunEpoch "$(date +%s)" lastRunSha "$sha" lastVerdict "$verdict" lastRun "$id"
+  # lastRunEpoch always advances (it's the every:<dur> wall-clock timer). lastRunSha (the on-commit /
+  # diff baseline) advances ONLY when the agent did real work or a genuine no-op: an agent may emit
+  # advance=0 to hold the baseline so a FAILED window is retried instead of silently skipped.
+  if [ "${advance:-1}" != 0 ]; then
+    [ -z "$sha" ] && sha="$(git_head "$path")"
+    state_set "$t" "$a" lastRunEpoch "$(date +%s)" lastRunSha "$sha" lastVerdict "$verdict" lastRun "$id"
+  else
+    state_set "$t" "$a" lastRunEpoch "$(date +%s)" lastVerdict "$verdict" lastRun "$id"
+  fi
 
   local emoji="✅"; case "$verdict" in fail|error|timeout) emoji="❌";; warn|issues) emoji="⚠️";; skipped) emoji="⏭️";; esac
   log "$emoji $t/$a → $verdict  ${findings:+(${findings} findings) }${cost:+\$$cost }$id"
@@ -133,10 +145,10 @@ cmd_add_target(){ # add-target <key> <local-path> [base]
   [ -z "$base" ] && base="main"
   local tmp; tmp="$(mktemp)"
   jq --arg k "$key" --arg p "$path" --arg gh "$gh" --arg b "$base" \
-    '.targets[$k]={path:$p,github:$gh,base:$b,ai_allowed:true,agents:{review:{enabled:true,cadence:"on-commit"},"docs-sync":{enabled:false,cadence:"on-commit"}}}' \
+    '.targets[$k]={path:$p,github:$gh,base:$b,ai_allowed:true,agents:{review:{enabled:true,cadence:"on-commit"},"docs-sync":{enabled:false,cadence:"on-commit"},"brain-sync":{enabled:false,cadence:"every:24h"}}}' \
     "$TARGETS_JSON" > "$tmp" && mv "$tmp" "$TARGETS_JSON" || die "failed to write registry"
   echo "added target '$key':"; jq --arg k "$key" '.targets[$k]' "$TARGETS_JSON"
-  echo; echo "review is on by default. Enable docs-sync, or add a qa app block, by editing config/targets.json."
+  echo; echo "review is on by default. Enable docs-sync / brain-sync, or add a qa app block, by editing config/targets.json. (brain-sync also needs BRAIN_PATH in config/sentinel.env.)"
 }
 
 cmd_install(){ # write + load the launchd scheduler
@@ -173,6 +185,7 @@ cmd_doctor(){
   echo "pi default:   provider=$QA_PROVIDER model=$QA_MODEL"
   echo "scheduler:    $(launchctl list 2>/dev/null | grep -q com.sentinel.scheduler && echo "loaded" || echo "not loaded (sentinel install)")"
   if have gh; then echo "gh auth:      $(gh auth status >/dev/null 2>&1 && echo ok || echo "not logged in (PR/comment modes need it)")"; fi
+  echo "brain repo:   $([ -n "${BRAIN_PATH:-}" ] && [ -d "${BRAIN_PATH:-}/.git" ] && echo "ok ($BRAIN_PATH → ${BRAIN_GITHUB:-no-remote}, PR=$ENABLE_BRAIN_PR)" || echo "UNSET/not-a-repo (brain-sync will skip)")"
 }
 
 usage(){ cat <<EOF
