@@ -15,6 +15,16 @@ A launchd heartbeat (`sentinel tick`, every 15 min) checks each target's cadence
 
 ---
 
+## How it works, in plain terms
+
+Sentinel is a small set of tireless teammates that check your projects on a schedule, each with one job. A **reviewer** reads every new code change and flags what looks wrong. A **docs editor** notices when your README has drifted from the code and writes the fix — as a suggestion you approve, never a silent change. A **knowledge keeper** quietly records what each repo learned this week into one shared team doc. And a **QA tester** actually uses your app.
+
+That last one is the part that's different. Most automated testers click around a screen and report if something looks off. Sentinel's reads your code first to work out what the product *is* — point it at a hotel booking app and it figures out, on its own, that it should test making a booking, checking a guest in, cancelling one, and running the nightly close. Then it does exactly that: it creates a real booking, confirms it actually saved on the server (not just that the screen looked happy), pokes at the edge cases a careful tester would, and writes up what broke — both what the guest sees and what's happening behind the scenes.
+
+You don't write a single test. You point it at a repo and it works the rest out. It runs while you sleep, so you wake up to a report instead of a 2 a.m. bug.
+
+---
+
 ## The `qa` flow engine — testing that understands your product
 
 Point the `qa` agent at any web app with `engine: "flow"` and, **without you writing a test plan**, it:
