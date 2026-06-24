@@ -1,5 +1,5 @@
 {
-  "_comment": "Target registry. Copy to config/targets.json (gitignored) and add YOUR repos. Each target has agents (review | docs-sync | qa); cadence is 'on-commit' or 'every:<dur>' (e.g. every:12h). ai_allowed gates sending a repo's code/DOM/diff to external models — set it deliberately for proprietary code.",
+  "_comment": "Target registry. Copy to config/targets.json (gitignored) and add YOUR repos. Each target has agents (review | docs-sync | qa | brain-sync); cadence is 'on-commit' or 'every:<dur>' (e.g. every:12h). brain-sync distills important changes into the shared Simbastack-hq/simbastack-brain repo as a PR — set BRAIN_PATH in config/sentinel.env, and use 'every:24h' (never 'on-commit'). ai_allowed gates sending a repo's code/DOM/diff to external models — set it deliberately for proprietary code.",
   "targets": {
 
     "_example_simple_webapp": {
@@ -52,7 +52,8 @@
             }
           }
         },
-        "review": { "enabled": false, "cadence": "on-commit" }
+        "review": { "enabled": false, "cadence": "on-commit" },
+        "brain-sync": { "enabled": true, "cadence": "every:24h" }
       }
     }
 

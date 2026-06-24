@@ -1,0 +1,14 @@
+{
+  "_comment": "Simplest Sentinel: watch ONE repo and review the diff on every commit. No app to boot. Copy to config/targets.json and change `path`. review is read-only and never writes to your repo.",
+  "targets": {
+    "my-repo": {
+      "path": "/Users/you/projects/my-repo",
+      "github": "your-org/my-repo",
+      "base": "main",
+      "ai_allowed": true,
+      "agents": {
+        "review": { "enabled": true, "cadence": "on-commit" }
+      }
+    }
+  }
+}

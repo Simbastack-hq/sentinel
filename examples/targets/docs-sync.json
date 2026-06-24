@@ -1,0 +1,15 @@
+{
+  "_comment": "docs-sync: keep a repo's Markdown in step with its code. Runs claude in an isolated worktree, hard-guarded to docs-only — one non-doc change discards everything. Set ENABLE_DOCS_PR=1 in config/sentinel.env to open a PR (it NEVER auto-merges); otherwise it saves a local patch. Copy to config/targets.json and adjust path/github.",
+  "targets": {
+    "my-repo": {
+      "path": "/Users/you/projects/my-repo",
+      "github": "your-org/my-repo",
+      "base": "main",
+      "ai_allowed": true,
+      "agents": {
+        "review": { "enabled": true, "cadence": "on-commit" },
+        "docs-sync": { "enabled": true, "cadence": "every:24h" }
+      }
+    }
+  }
+}

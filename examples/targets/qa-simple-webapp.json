@@ -1,0 +1,27 @@
+{
+  "_comment": "qa with the pi-native engine: boot a single-process web app on localhost and let Mimo drive a browser toward ONE goal every 12h. Read-only against the app; boots it, tests it, tears the whole process tree down. Copy to config/targets.json and adjust path/start_cmd/port/goal.",
+  "targets": {
+    "my-webapp": {
+      "path": "/Users/you/projects/my-webapp",
+      "github": "your-org/my-webapp",
+      "base": "main",
+      "ai_allowed": true,
+      "agents": {
+        "qa": {
+          "enabled": true,
+          "cadence": "every:12h",
+          "app": {
+            "engine": "pi-native",
+            "start_cmd": "node server.js",
+            "port": 3000,
+            "health_path": "/",
+            "boot_timeout": 60,
+            "max_steps": 12,
+            "goal": "Exercise the core flow: the main action (upload / search / submit) is present and works, results render without JS errors, and empty/error states are graceful. Report broken UI, console errors, failed network requests, and stuck/slow states."
+          }
+        },
+        "review": { "enabled": true, "cadence": "on-commit" }
+      }
+    }
+  }
+}

@@ -2,13 +2,14 @@
 
 **24/7 specialized AI agents that watch your repos and apps and do one job well, unattended.**
 
-Sentinel runs three kinds of agents on a schedule:
+Sentinel runs four kinds of agents on a schedule:
 
 | Agent | What it does | Writes? |
 |---|---|---|
 | **review** | Reviews the git diff since its last run and posts a findings report. | no (read-only) |
 | **docs-sync** | Updates Markdown docs to match the code, in a throwaway worktree, hard-guarded to **docs-only**; emits a patch or PR. | docs only, **never auto-merges** |
 | **qa** | Boots the app and tests it — from a quick UI sweep up to an **autonomous, codebase-aware, deep frontend+backend test suite** that derives the real business flows from your code and exercises them end-to-end. | no (read-only vs the app) |
+| **brain-sync** | Distills each repo's important changes (skills/conventions, architecture, API, deps/infra) into a shared team **knowledge repo** as a PR — one per-repo file, append-only dated bullets, single-file + secret-content guarded. | one per-repo file in the brain, **never auto-merges** |
 
 A launchd heartbeat (`sentinel tick`, every 15 min) checks each target's cadence and runs only what's due. It's self-contained — it only shells out to the CLIs it drives (`pi`/Mimo, `claude`, `codex`, `gh`, Playwright).
 
@@ -62,7 +63,8 @@ Installed and on `PATH`:
 - **[pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)** — the agent harness, authed for the **Xiaomi/Mimo** provider (`pi` uses `~/.pi/agent/auth.json`; the vision helpers read `.xiaomi.key` from there, or `$XIAOMI_API_KEY`).
 - **node** ≥ 20, **jq**, **git**, **gh** (authed: `gh auth login`), **curl**, **lsof**, **gtimeout** (`brew install coreutils`), **python3**.
 - **Playwright** (installed by `npm install`; reuses the shared chromium cache).
-- For the agents you enable: **claude** (docs-sync, optional review), **codex** (optional review).
+- For the agents you enable: **claude** (docs-sync, brain-sync, optional review), **codex** (optional review).
+- **brain-sync** also needs a local clone of the shared knowledge repo at `BRAIN_PATH` (origin matching `BRAIN_GITHUB`) and `gh` with write access to it. See [`examples/brain-scaffold/SETUP.md`](examples/brain-scaffold/SETUP.md).
 
 Check everything with `sentinel doctor`.
 
@@ -84,11 +86,24 @@ bin/sentinel install                     # load the 15-min launchd scheduler (24
 
 `config/sentinel.env` and `config/targets.json` are **gitignored** — credentials and your registry stay local.
 
+## Examples
+
+Don't hand-write config from scratch — copy a ready-made one from [`examples/`](examples/README.md) and change the paths:
+
+| Want to… | Start from |
+|---|---|
+| Review a repo on every commit | [`examples/targets/review-only.json`](examples/targets/review-only.json) |
+| Boot + test a simple web app | [`examples/targets/qa-simple-webapp.json`](examples/targets/qa-simple-webapp.json) |
+| Deep FE+BE flow test behind a login | [`examples/targets/qa-fullstack-flow.json`](examples/targets/qa-fullstack-flow.json) |
+| Keep docs in sync as PRs | [`examples/targets/docs-sync.json`](examples/targets/docs-sync.json) |
+| Feed important changes into a shared brain | [`examples/targets/brain-sync.json`](examples/targets/brain-sync.json) + [`examples/brain-scaffold/SETUP.md`](examples/brain-scaffold/SETUP.md) |
+| Run all four agents on one repo | [`examples/targets/full-fleet.json`](examples/targets/full-fleet.json) |
+
 ## Usage
 
 ```bash
 sentinel tick                 # evaluate cadences, run what's due (launchd runs this)
-sentinel run <target> <agent> # run one now: review | docs-sync | qa
+sentinel run <target> <agent> # run one now: review | docs-sync | qa | brain-sync
 sentinel status               # recent runs (verdict, findings, cost)
 sentinel report <target> qa   # print the latest report
 sentinel logs <run-id> [n]    # tail a run log
@@ -120,9 +135,13 @@ Credentials referenced by `email_env`/`password_env` live only in `config/sentin
 ### Tuning the flow engine (env or `config/sentinel.env`)
 `FLOW_MAX` (flows per run, default 2) · `FLOW_ATTEMPTS` (attempts per flow, default 2) · `FLOW_STEPS` (hard tool-call cap per attempt, default 90) · `RUN_WALL_TIMEOUT` (per-run wall cap, default 3600s). A full 2×2 deep run is ~40 min / ~$2 of Mimo.
 
+### Configuring brain-sync (env or `config/sentinel.env`)
+The brain location is **global** (one brain for all targets): `BRAIN_PATH` (local clone — leave blank to disable), `BRAIN_GITHUB` (default `Simbastack-hq/simbastack-brain`), `BRAIN_BASE` (default `main`), `ENABLE_BRAIN_PR` (`0` dry-run patch / `1` open PR), `MAX_BRAIN_DIFF_CHARS` (default 80000 — above this it sends a stat+commit-log summary), `BRAIN_MIN_DIFF_LINES` (default 8 — trivial windows below this open no PR). Per target you only set `brain-sync: { enabled, cadence }` in `targets.json` (use `every:24h`, never `on-commit`). Full walkthrough: [`examples/brain-scaffold/SETUP.md`](examples/brain-scaffold/SETUP.md).
+
 ## Safety model
 
 - **review** is read-only (sandboxed). **docs-sync** runs in an isolated git worktree with a docs-only allow-list — one non-doc change discards everything; it never auto-merges. **qa** is read-only against the app, boots it on localhost, and tears down the whole process tree (incl. orphans).
+- **brain-sync** reads a repo's diff (only when `ai_allowed=true`) and edits an isolated worktree of the **brain** repo guarded to a **single per-repo file** — any other changed path discards everything — plus a **secret-content scan** of the staged diff (any match discards everything and wipes the patch). It opens a PR (`ENABLE_BRAIN_PR=1`), never auto-merges, and **holds its diff baseline on any failure** so a window is retried, never silently dropped.
 - The LLM only ever gets browser/API tools — no shell/filesystem access.
 - `ai_allowed` per target gates sending a repo's code/DOM/diff to external models. **Work/proprietary repos are not seeded** — add them deliberately.
 - Notifications carry summaries only; credentials are filled into forms by Playwright and never enter prompts, traces, or logs.
@@ -131,7 +150,8 @@ Credentials referenced by `email_env`/`password_env` live only in `config/sentin
 
 ```
 bin/        sentinel (CLI) · recon.js · pi-ask.js · qa-drive.js · mimo-vision.js · uiux-review.js · merge-flows.js · render-report.js
-agents/     review.sh · docs-sync.sh · qa.sh
+agents/     review.sh · docs-sync.sh · qa.sh · brain-sync.sh
+examples/   ready-to-copy targets.json registries + brain-repo scaffold (see examples/README.md)
 lib/        common.sh  (shared: env, cadence, locking, accessors)
 pi-ext/     qa-browser/  (pi extension: Playwright-backed browser + api_request tools)
 config/     *.example  (copy to the real, gitignored files)

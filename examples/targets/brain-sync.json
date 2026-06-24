@@ -1,0 +1,25 @@
+{
+  "_comment": "brain-sync: distill each repo's IMPORTANT changes (skills/conventions, architecture, API, deps/infra) into the shared Simbastack-hq/simbastack-brain repo as a PR — one per-repo file at 30-engineering/repos/<repo>.md, append-only, secret-scanned, never auto-merged. The brain location is GLOBAL config in config/sentinel.env (BRAIN_PATH + ENABLE_BRAIN_PR), NOT here — here you only enable it per repo. Use every:24h (a daily digest), never on-commit. Copy to config/targets.json and adjust paths; enable brain-sync on every repo you want fed into the brain.",
+  "targets": {
+    "service-a": {
+      "path": "/Users/you/projects/service-a",
+      "github": "your-org/service-a",
+      "base": "main",
+      "ai_allowed": true,
+      "agents": {
+        "review": { "enabled": true, "cadence": "on-commit" },
+        "brain-sync": { "enabled": true, "cadence": "every:24h" }
+      }
+    },
+    "web-app": {
+      "path": "/Users/you/projects/web-app",
+      "github": "your-org/web-app",
+      "base": "main",
+      "ai_allowed": true,
+      "agents": {
+        "review": { "enabled": true, "cadence": "on-commit" },
+        "brain-sync": { "enabled": true, "cadence": "every:24h" }
+      }
+    }
+  }
+}
