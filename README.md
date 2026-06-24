@@ -15,7 +15,7 @@ A launchd heartbeat (`sentinel tick`, every 15 min) checks each target's cadence
 
 ---
 
-## The headline: the `qa` flow engine
+## The `qa` flow engine — testing that understands your product
 
 Point the `qa` agent at any web app with `engine: "flow"` and, **without you writing a test plan**, it:
 
@@ -158,3 +158,9 @@ config/     *.example  (copy to the real, gitignored files)
 launchd/    com.sentinel.scheduler.plist
 docs/       DESIGN.md
 ```
+
+## License & credits
+
+MIT — see [LICENSE](LICENSE).
+
+Built by **[Hemanshu Upadhyay](https://github.com/Hemanshu-Upadhyay)** at **[SimbaStack](https://github.com/Simbastack-hq)**.
