@@ -1,75 +1,62 @@
-# Sentinel: an AI QA agent that *understands your product*
+# Most "AI QA" is just a clicker. We built one that reads your code first.
 
-*Most "AI QA" tools click around your UI and report what looks broken. We wanted one that tests like a senior QA engineer — that reads your codebase, figures out the real business flows on its own, and exercises them end-to-end across the frontend **and** the backend. This is Sentinel, and it's open source.*
+*Point a typical AI testing agent at your app and it loads a page, clicks a few things, flags a console error, and stops. It never learns what the product is for. Sentinel does: it reads the codebase, works out the real business flows, and tests them end to end across the frontend and the backend. It's open source under MIT.*
 
----
+## The gap between clicking and understanding
 
-## The gap
+If you've put an AI agent on your app, you know the pattern. It opens a page, clicks a few buttons, notices a misaligned element or a console error, and calls the run done. That's useful the way a smoke test is useful, but it's a clicker. It has no model of what your product actually does.
 
-If you've tried an AI agent on your app, you've seen the pattern: it loads a page, clicks a few buttons, notices a console error or a misaligned button, and calls it a day. Useful — but it's a *clicker*. It has no idea what your product actually *does*.
+A QA engineer worth hiring doesn't click around. They learn the product first, then reason about it: this is a hotel system, so I need to test a single booking, a group booking, a cancellation that frees the room back up, check-in, check-out, and the night audit, and I need to confirm each one actually persisted on the server instead of trusting that the UI looked happy. The distance between those two behaviors is the whole problem, and closing it is what we set out to do.
 
-A real QA engineer doesn't click randomly. They learn the product, then think: *"This is a hotel system. So I need to test creating a single booking, a group booking, a cancellation that should free the room back up, check-in, check-out, and the night audit. And I need to verify the booking actually persisted on the server — not just that the UI looked happy."*
+## What happened when we gave it a real app and no instructions
 
-That gap — between **clicking a UI** and **understanding a product** — is the whole game. So we built an agent that closes it.
+We pointed Sentinel at a working full-stack hotel PMS: a Next.js frontend, a separate API service, a Postgres database. No test plan, no script, no list of flows. Just the repo and admin credentials for a throwaway test tenant with disposable data.
 
-## The "aha"
+It read the code, concluded the product was a boutique and safari hotel PMS, and derived nine critical business flows on its own: the reservation lifecycle, group bookings, cancellations, check-in by token, the night audit, payment to invoice to refund. That's close to the list a human QA lead would write on day one, and nobody handed it to the agent.
 
-We pointed Sentinel at a real, full-stack hotel PMS (Next.js frontend, a separate API, a Postgres database) and gave it **no test plan** — just the repo and admin credentials for a throwaway test tenant.
+Then it ran them, and the trace read like watching a person work:
 
-It read the code, decided the product was a *"boutique/safari hotel PMS,"* and derived nine critical business flows on its own — the reservation lifecycle, group bookings, cancellations, check-in via token, the night audit, payment → invoice → refund. Exactly the list a human QA lead would write.
+- It called `GET /api/availability`, got a `400`, worked out the params it was missing, and retried with `adults=2&children=0` to get a `200`.
+- It created a real reservation with `POST /api/reservations` (`201`), then fetched it back to confirm it had persisted with the right room and rate.
+- It walked the status lifecycle, found the check-in endpoint by trial (`/checkin` gave `404`, `/check-in` gave `400`, then a valid call returned `200`), and checked the folio.
 
-Then it *tested* them. Watching the trace of the reservation-lifecycle flow felt like watching a person:
+The bugs it surfaced are ones a clicker structurally cannot find:
 
-- It hit `GET /api/availability`, got a `400`, **figured out the required params**, and retried with `&adults=2&children=0` → `200`.
-- It **created a real reservation** (`POST /api/reservations → 201`), then `GET`-ed it back to confirm it persisted with the right room and rate.
-- It drove the status lifecycle, **discovered the check-in endpoint by trial** (`/checkin → 404`, `/check-in → 400`, … → `200`), and verified the folio.
+- Confirming a reservation returned `NO_AVAILABILITY`, even though that same reservation already held the room. A backend state-machine bug, invisible from the UI.
+- The calendar showed a room as available after a booking already existed for it. The API and the UI disagreed, and only checking both layers caught it.
+- Check-in returned `200`, but a related status never flipped on the server.
 
-And it found bugs a click-bot structurally *cannot*:
-
-- A **backend state-machine bug**: confirming a reservation returned `NO_AVAILABILITY` even though the reservation already held the room.
-- A **UI↔backend mismatch**: the calendar showed a room as "available" *after* a booking existed for it — the API and the UI disagreed.
-- Check-in returned `200`, **but a related status never updated** on the server.
-
-You only catch those by *creating data and checking both layers*. That's the point.
-
----
+You find those by creating data and then inspecting both layers. A screenshot tells you none of it.
 
 ## How it works
 
-Under the hood, the QA agent's `flow` engine is a pipeline:
+The QA agent runs a `flow` engine, a pipeline of five steps:
 
-```
-recon (read the repo)  →  Mimo derives the business flows  →  deep multi-attempt execution  →  union → report
-   routes, API modules,        cached per commit              FE (Playwright) + BE (api_request)
-   services, DB schema                                        asserting state at each step
-```
+1. Read the repo. A fast deterministic pass extracts the structure: frontend routes, API route modules, services, database entities. The model reasons over that digest instead of crawling a monorepo blind, which is slow and misses things.
+2. Derive the flows. Mimo, the model we run for decisions through the `pi` agent harness, turns the digest into a prioritized list of end-to-end business flows, each with UI steps, backend assertions, and edge cases. The plan is cached per commit, so it only re-derives when the code changes.
+3. Execute deeply. Each flow runs as an agent loop: the model decides the next action, Playwright drives the browser, and a first-class `api_request` tool calls the backend with the app's own logged-in session to check server state at each step. The model only ever gets browser and API tools. It never touches your shell or filesystem.
+4. Run it more than once. Autonomous agents are non-deterministic, and we measured it: on one flow, one attempt found zero bugs and another found five. So each flow runs several attempts and the findings are unioned, which is how you turn that variance into coverage you can trust.
+5. Grade the design. Every screen the agent visits also gets a vision pass from a multimodal model, scoring visual hierarchy, spacing, color contrast against WCAG, typography, and broken states. That's the layer a DOM-only check can't see.
 
-1. **Understand** — a fast, deterministic pass extracts the app's structure (frontend routes, API route modules, services, DB entities). A model reasons over *that digest* — not by slowly crawling a monorepo blind.
-2. **Derive** — Mimo turns the digest into a prioritized list of end-to-end business flows, each with UI steps, **backend assertions**, and edge cases. Cached per commit.
-3. **Execute deeply** — each flow runs as an agent loop: Mimo decides, Playwright drives the browser, and a first-class `api_request` tool calls the **backend** with the app's own logged-in session to verify server state. The model only ever gets browser/API tools — never your shell or filesystem.
-4. **Be reliable anyway** — autonomous agents are non-deterministic. On the same flow, one run found 0 bugs and another found 5. So each flow runs **multiple attempts and the findings are unioned** — redundancy turns variance into coverage.
-5. **Grade the design** — every screen it visits also gets a vision pass (a multimodal model) scoring visual hierarchy, spacing, **color contrast / WCAG**, typography, consistency, and states — the UI/UX layer a DOM-only check is blind to.
+All of it runs on a schedule, on a fifteen-minute heartbeat, next to two sibling agents: a code-review agent that reads each new diff, and a docs-sync agent that updates your Markdown to match the code inside an isolated worktree, hard-guarded so it can only touch docs and never auto-merges.
 
-It all runs on a 24/7 schedule (a 15-minute heartbeat), alongside two sibling agents: a **code-review** agent and a **docs-sync** agent (which updates your Markdown to match the code, in an isolated worktree, hard-guarded so it can *only* touch docs and never auto-merges).
+## Why it's the part that was missing
 
-## Why this is the missing piece
+You don't write or maintain a single test. You point it at a repo, it comprehends the app and tests it, and when the product changes it re-derives the flows. Because it asserts server state through `api_request`, it catches data-integrity and state-machine bugs, not only the visual ones a screenshot would surface. The recon-then-derive step is generic, so the hotel PMS was just our demo; the same pipeline runs against any repo.
 
-- **No hand-written tests.** You don't script flows or maintain selectors. Point it at a repo; it comprehends and tests. When the product changes, it re-derives.
-- **Frontend *and* backend.** It asserts server state, so it catches data-integrity and state-machine bugs, not just visual ones.
-- **Any repo.** The recon→derive step is generic. We demoed a hotel PMS; it works the same on your app.
-- **Honest about agents.** A single autonomous run is a coin-flip on depth. We didn't pretend otherwise — we engineered around it with multi-attempt unioning and hard step budgets, so runs are both deep *and* bounded.
+And we didn't paper over the awkward part. A single autonomous run is a coin flip on depth, so we engineered around it with multi-attempt unioning and a hard per-attempt step budget that keeps a run both deep and bounded in cost.
 
 ## The stack
 
-Sentinel is deliberately boring to run: a set of bash + Node scripts, a launchd scheduler, and the CLIs it drives. The brains are **Mimo** (via the `pi` agent harness) for decisions, flow derivation, and review, with a multimodal Mimo model for vision; **Playwright** is the hands; **claude**/**codex** handle docs and optional deep review. A full deep run is a few cents to a couple of dollars of model usage — cheap enough to run on every repo, on a timer, locally.
+Sentinel is deliberately boring to operate: bash and Node scripts, a launchd scheduler, and the CLIs it drives. Mimo does the thinking (decisions, flow derivation, code review), a multimodal Mimo model does the vision pass, Playwright is the hands, and claude and codex handle docs and optional deeper review. A full deep run costs a few cents to a couple of dollars in model usage, cheap enough to leave running on every repo on a timer.
 
-## Honest limitations
+## What it can't do yet
 
-It's not magic. Agent exploration varies run to run (hence multi-attempt). Booting a complex stack needs the right config (ports, auth, a test database — never point write-capable QA at production data). And the deeper you go, the more it costs and the longer it takes — all tunable knobs. We'd rather tell you that than sell you perfection.
+It isn't magic. Exploration still varies run to run, which is why we run several attempts. Booting a complex stack takes the right config: ports, auth, a test database, and you should never point write-capable QA at production data. Depth trades off against time and cost, both of them knobs you set. We'd rather write that down than sell you perfection.
 
 ## Try it
 
-Sentinel is **MIT-licensed and open source**: **[github.com/Simbastack-hq/sentinel](https://github.com/Simbastack-hq/sentinel)**
+Sentinel is MIT-licensed and on GitHub: [github.com/Simbastack-hq/sentinel](https://github.com/Simbastack-hq/sentinel).
 
 ```bash
 git clone https://github.com/Simbastack-hq/sentinel.git && cd sentinel
@@ -78,4 +65,6 @@ cp config/targets.json.example config/targets.json   # register your repo
 bin/sentinel doctor && bin/sentinel run <your-app> qa
 ```
 
-QA that reads your code, understands your product, and tests it like a human would — frontend and backend, on autopilot. We think that's the bar AI QA should be held to. Tell us what it finds in *your* app.
+Point it at something real and see what it finds. PRs and issues welcome.
+
+— Hemanshu, building Sentinel
