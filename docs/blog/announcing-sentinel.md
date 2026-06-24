@@ -40,6 +40,24 @@ The QA agent runs a `flow` engine, a pipeline of five steps:
 
 All of it runs on a schedule, on a fifteen-minute heartbeat, next to two sibling agents: a code-review agent that reads each new diff, and a docs-sync agent that updates your Markdown to match the code inside an isolated worktree, hard-guarded so it can only touch docs and never auto-merges.
 
+## How we got here
+
+Mimo is where we started, not where we landed after a tournament. The setup was already running on the machine: the `pi` agent harness pointed at Mimo, Xiaomi's model family. So the first question was never which vendor to pick, it was whether a cheap model could drive a browser well enough to matter, and the first answer was no.
+
+Version one was a deterministic Node loop. The script owned control flow and called Mimo as a toolless one-shot brain, once per step: here is the DOM, name the single next action, and the loop ran it through Playwright. It worked on something simple. Against a small product-search app (upload a photo, get visually similar items), it found real bugs, including prices truncated mid-value like "₹4,19" and cards cut off, for less than half a cent a run ($0.0044). But the loop was the ceiling. The model saw one step at a time with no memory of why it took the last one, so it never accumulated enough context to test a flow with more than a couple of moves. It couldn't get past clicking around a single page.
+
+So we gave the loop to the model. Version two, which we called pi-native, registers Playwright-backed browser tools as a pi extension and lets Mimo drive them inside pi's own agent loop, with full session memory. It went deeper on a single goal. But it still needed a goal, and writing goals by hand is the exact chore we were trying to delete.
+
+Version three is the flow engine described above: read the repo, derive the flows, run each one against the browser and the backend. That was the one worth keeping.
+
+## Why Mimo, and what the first runs broke
+
+The model choice got more interesting when we added the design review. We sent screenshots to Mimo for a UI/UX pass and got nonsense back, because the model we were running, `mimo-v2.5-pro`, is text-only. The fix was to read what the Xiaomi API actually serves: alongside the text models it has `mimo-v2-omni`, which is multimodal. Vision now calls omni directly, since the `pi` harness only registers the text Mimo models. omni is a reasoning model and kept cutting off before it emitted its JSON verdict, until we gave it a much larger token budget. A small thing that ate an afternoon, which is exactly why it's worth writing down.
+
+We do run other models, just not in the hot loop. claude makes the surgical Markdown edits for the docs-sync agent inside a guarded worktree, where precision matters more than price and it runs rarely. codex, on gpt-5.5, sits in as an optional read-only review engine for when you want a slower, deeper second opinion. What kept Mimo as the default for the always-on work is frequency. The whole premise is a fifteen-minute heartbeat re-running review and QA across every repo you give it, and at that cadence cost is a design constraint rather than an afterthought. A Mimo decision is a fraction of a cent, a shallow QA run is a few cents, and the deepest multi-attempt run on the hotel PMS topped out around $1.95. That number is what makes "leave it running on everything" a real plan instead of a slogan.
+
+The first full run against a real full-stack app is where the integration bugs lived, and none of them were the model's fault. Our boot wrapper detached the dev server's session and `next dev` quietly died, so we went back to a plain background boot with a teardown that reaps the whole process tree. Playwright filled the login form before React had hydrated, the empty submit came back a `400`, and a hydration-safe retype that verifies the field actually holds its value fixed it. The frontend spoke to `localhost` while the agent used `127.0.0.1`, so CORS blocked every call, an hour lost to a one-line config. The backend assertions returned `401` until we stopped reconstructing the auth token and simply reused the Authorization header the frontend was already sending. Unglamorous, all of it, and precisely the work that decides whether an agent runs on your app or only in a demo.
+
 ## Why it's the part that was missing
 
 You don't write or maintain a single test. You point it at a repo, it comprehends the app and tests it, and when the product changes it re-derives the flows. Because it asserts server state through `api_request`, it catches data-integrity and state-machine bugs, not only the visual ones a screenshot would surface. The recon-then-derive step is generic, so the hotel PMS was just our demo; the same pipeline runs against any repo.
@@ -48,7 +66,7 @@ And we didn't paper over the awkward part. A single autonomous run is a coin fli
 
 ## The stack
 
-Sentinel is deliberately boring to operate: bash and Node scripts, a launchd scheduler, and the CLIs it drives. Mimo does the thinking (decisions, flow derivation, code review), a multimodal Mimo model does the vision pass, Playwright is the hands, and claude and codex handle docs and optional deeper review. A full deep run costs a few cents to a couple of dollars in model usage, cheap enough to leave running on every repo on a timer.
+Sentinel is deliberately boring to operate: bash and Node scripts, a launchd scheduler, and the CLIs it shells out to. There's no service to host and no database of its own, and you can read the whole thing in an afternoon. That last part is on purpose; an unattended agent you can't audit is one you shouldn't be running.
 
 ## What it can't do yet
 
