@@ -203,7 +203,7 @@ install_cron(){
   # Build a VALID cron expression: minute-step under an hour, else an hour-step (cron can't do >59 in a field).
   local sched human
   if [ "$mins" -le 59 ]; then sched="*/$mins * * * *"; human="${mins}m"
-  else local hrs=$(( (mins + 59) / 60 )); [ "$hrs" -gt 23 ] && hrs=23; sched="0 */$hrs * * *"; human="${hrs}h"; fi
+  else local hrs=$(( (mins + 59) / 60 )); if [ "$hrs" -gt 23 ]; then echo "note: SCHEDULER_INTERVAL > 23h can't be expressed in cron's hour field — capping the cron tick at 23h (systemd has no such limit)"; hrs=23; fi; sched="0 */$hrs * * *"; human="${hrs}h"; fi
   # Call the script directly (its shebang picks bash) — no hardcoded /bin/bash, works on non-FHS systems.
   local line="$sched SENTINEL_HOME='$SENTINEL_HOME' PATH='$PATH' '$SENTINEL_HOME/bin/sentinel' tick >> '$SENTINEL_HOME/var/scheduler.log' 2>&1 # com.sentinel.scheduler"
   ( crontab -l 2>/dev/null | grep -v 'com.sentinel.scheduler'; echo "$line" ) | crontab - \
