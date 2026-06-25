@@ -25,6 +25,19 @@ host="$(t_app "$TARGET" host)"; : "${host:=127.0.0.1}"   # browser origin (some 
 api_base="$(t_app "$TARGET" api_base)"                    # backend API base for flow-engine assertions (e.g. http://localhost:4000)
 # Single source for the browser origin: the remote URL, or the locally-booted web port.
 if [ "$remote_mode" = 1 ]; then qa_base="${remote_base%/}"; : "${api_base:=$qa_base}"; else qa_base="http://$host:$port"; fi
+# Fail CLOSED: driving a non-local origin can act on live data (UI actions + authenticated api_request).
+# Require an explicit opt-in so a stray base_url can't silently hammer staging/prod.
+if [ "$remote_mode" = 1 ]; then
+  allow_live="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.allow_live_data // false' "$TARGETS_JSON" 2>/dev/null)"
+  case "$qa_base" in
+    *://localhost*|*://127.0.0.1*|*://"[::1]"*) : ;;   # local deploy — safe
+    *) if [ "$allow_live" != true ]; then
+         echo "REFUSING remote QA against a live origin ($qa_base) without allow_live_data"
+         { echo "# QA — $TARGET — refused (live data)"; echo; echo "\`base_url\` = \`$qa_base\` is a non-local origin, so QA could act on live data there. Set \`qa.app.allow_live_data: true\` to proceed (and scope the goal/flows to read-only or non-destructive actions)."; } > "$rd/report.md"
+         result skipped "remote live-data not allowed (set allow_live_data:true)" 0 "" true "$head"; exit 0
+       fi ;;
+  esac
+fi
 aux_ports="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.aux_ports[]? // empty' "$TARGETS_JSON" 2>/dev/null | tr '\n' ' ')"
 all_ports="$port $aux_ports"
 # Login (optional): targets.json references env-var NAMES; the secrets live only in config/sentinel.env and are
@@ -152,7 +165,7 @@ done
 fi   # end local-boot block
 # Engine: node-loop (v1, deterministic; default) or pi-native (v2, Mimo drives via pi's agent loop).
 engine="$(t_app "$TARGET" engine)"; : "${engine:=${QA_ENGINE:-node-loop}}"
-echo "app healthy; engine=$engine; driving up to $steps steps with $QA_MODEL"
+if [ "$remote_mode" = 1 ]; then echo "engine=$engine; driving $qa_base for up to $steps steps with $QA_MODEL"; else echo "app healthy; engine=$engine; driving up to $steps steps with $QA_MODEL"; fi
 
 case "$engine" in
   flow)

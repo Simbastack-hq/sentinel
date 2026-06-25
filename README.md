@@ -154,12 +154,13 @@ Set `base_url` to test an app that's **already running** — a staging deploy, a
     "engine": "flow",
     "base_url": "https://staging.example.com",
     "api_base": "https://api.example.com",
+    "allow_live_data": true,
     "health_path": "/"
   }
 }
 ```
 
-The `path` at the target level still points at the local repo (for `recon`). Combine with `web3` to drive a deployed wallet-gated dApp. ⚠️ Pointing `base_url` at **production** means QA acts on live data — scope the `goal`/flows to read-only or non-destructive actions accordingly.
+The `path` at the target level still points at the local repo (for `recon`). Combine with `web3` to drive a deployed wallet-gated dApp. ⚠️ **Fail-closed safety:** a non-local `base_url` (anything but `localhost`/`127.0.0.1`) is **refused** unless you set `allow_live_data: true` — driving a live origin means QA can act on real data (UI actions *and* authenticated `api_request`), so opt in deliberately and scope the `goal`/flows to read-only or non-destructive actions.
 
 ### QA for wallet dApps (web3 mode)
 
