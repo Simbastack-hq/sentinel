@@ -99,13 +99,17 @@ async function ensurePage(): Promise<Page> {
       try { stubs = process.env.WEB3_STUBS ? JSON.parse(process.env.WEB3_STUBS) : []; } catch { stubs = []; }
       const wlKey = process.env.WEB3_WL_KEY || "";
       stubs = stubs.map((s: any) => (s && s.whitelist ? { ...s, whitelistKey: wlKey } : s));
+      const allowFunded = process.env.WEB3_ALLOW_FUNDED === "1";
       const { address } = await installWeb3(page, {
         rpcUrl: process.env.WEB3_RPC || "https://arb1.arbitrum.io/rpc",
         chainId: parseInt(process.env.WEB3_CHAIN_ID || "42161", 10),
         privateKey: process.env.WEB3_PK || undefined,
+        allowFunded,
       }, stubs);
-      // The address is an unfunded throwaway (safe to record). The private KEY never leaves Node.
-      trace.push({ n: 0, action: { type: "web3" }, observation: `injected unfunded burner ${address} on chain ${process.env.WEB3_CHAIN_ID || "42161"} (txs never broadcast)`, result: "no real funds can move", screenshot: "" });
+      // The ADDRESS is safe to record; the private KEY never leaves Node. allow_funded = a capped canary wallet
+      // (broadcasts are still blocked — a real fill only happens if the app submits via its own backend).
+      const kind = allowFunded ? "funded canary wallet" : "unfunded burner";
+      trace.push({ n: 0, action: { type: "web3" }, observation: `injected ${kind} ${address} on chain ${process.env.WEB3_CHAIN_ID || "42161"} (txs never broadcast)`, result: allowFunded ? "no on-chain tx broadcast; cap the balance" : "no real funds can move", screenshot: "" });
     } catch (e: any) {
       const msg = String(e?.message || e);
       // A tripped safety guard (a FUNDED/used key) must HARD-ABORT — never drive a wallet that could move
