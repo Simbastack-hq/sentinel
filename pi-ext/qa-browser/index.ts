@@ -23,6 +23,12 @@ const LOGIN_EMAIL = process.env.QA_LOGIN_EMAIL || "";
 const LOGIN_PASSWORD = process.env.QA_LOGIN_PASSWORD || "";
 const LOGIN_PATH = process.env.QA_LOGIN_PATH || "/login";
 const API_BASE = process.env.QA_API_BASE || ""; // backend API base for assertions (e.g. http://localhost:4000)
+// Backend-auth capture is configurable so non-Supabase / non-"/api/" apps work too.
+// QA_AUTH_URL_RE: JS regex matched against request URLs to sniff the app's own Authorization header
+//   (default "/api/"; e.g. "pearprotocol\\.io|/v1/" for an app whose API lives on another host/path).
+// QA_AUTH_STORAGE_KEY: a localStorage key (substring) to read a bearer token from when no header was sniffed.
+const AUTH_URL_RE: RegExp = (() => { try { return new RegExp(process.env.QA_AUTH_URL_RE || "/api/"); } catch { return /\/api\//; } })();
+const AUTH_STORAGE_KEY = process.env.QA_AUTH_STORAGE_KEY || "";
 fs.mkdirSync(OUT, { recursive: true });
 
 let browser: Browser | null = null;
@@ -83,7 +89,7 @@ async function ensurePage(): Promise<Page> {
   page.on("pageerror", (e) => { if (pageErrors.length < 400) pageErrors.push((e.message || String(e)).slice(0, 300)); });
   page.on("requestfailed", (r) => { if (failedRequests.length < 400) { const f = r.failure(); failedRequests.push(`${r.method()} ${r.url().slice(0, 140)} — ${f ? f.errorText : "failed"}`); } });
   // Sniff the frontend's own API auth so api_request can authenticate exactly like the app does.
-  page.on("request", (r) => { try { const a = r.headers()["authorization"]; if (a && /\/api\//.test(r.url())) capturedAuth = a; } catch {} });
+  page.on("request", (r) => { try { const a = r.headers()["authorization"]; if (a && AUTH_URL_RE.test(r.url())) capturedAuth = a; } catch {} });
   // Web3 dApp QA: inject an UNFUNDED burner wallet at window.ethereum (key stays in Node, txs are NEVER
   // broadcast) plus any gate stubs, BEFORE the first navigation so wagmi/ethers see the wallet at load.
   if (process.env.WEB3_ENABLED === "1") {
@@ -343,18 +349,52 @@ export default function (pi: ExtensionAPI) {
       const url = /^https?:/.test(rawPath) ? rawPath : API_BASE.replace(/\/$/, "") + (rawPath.startsWith("/") ? "" : "/") + rawPath;
       const method = String(params.method || "GET").toUpperCase();
       const body = params.body && String(params.body).trim() ? String(params.body) : undefined;
+      // SECURITY: only forward the app's bearer to a TRUSTED ORIGIN — the API base origin or the page's own
+      // origin. A model-supplied absolute URL to any other host gets no token (the capture regex is for
+      // sniffing the app's own traffic, NOT a forwarding allowlist — "/api/" would match evil.tld/api/...).
+      const allowAuth = (() => {
+        try {
+          const dest = new URL(url).origin;
+          const apiOrigin = API_BASE ? new URL(API_BASE).origin : "";
+          let pageOrigin = ""; try { pageOrigin = new URL(BASE).origin; } catch {}
+          return (!!apiOrigin && dest === apiOrigin) || (!!pageOrigin && dest === pageOrigin);
+        } catch { return false; }
+      })();
       let res: any;
       try {
-        // fetch from INSIDE the page → inherits the app origin + auth (Supabase JWT in localStorage).
-        res = await p.evaluate(async ({ url, method, body, auth }: any) => {
-          let authHeader = auth || "";
-          if (!authHeader) { try { const k = Object.keys(localStorage).find((x) => x.startsWith("sb-") && x.endsWith("-auth-token")); if (k) { const v = JSON.parse(localStorage.getItem(k)); const tok = v.access_token || (v.currentSession && v.currentSession.access_token) || ""; if (tok) authHeader = "Bearer " + tok; } } catch {} }
+        // fetch from INSIDE the page → inherits the app origin + auth. Prefer the sniffed header; else read a
+        // bearer token from localStorage (configured key first, then the Supabase default shape). Bearer is
+        // attached ONLY when allowAuth (trusted destination); cookies (credentials:include) are origin-scoped anyway.
+        res = await p.evaluate(async ({ url, method, body, auth, storageKey, allowAuth }: any) => {
+          let authHeader = allowAuth ? (auth || "") : "";
+          if (!authHeader && allowAuth) {
+            // Pull an access token out of common localStorage shapes (Supabase, Zustand-persist, plain JWT).
+            const pickTok = (raw: string | null): string => {
+              if (!raw) return "";
+              try {
+                const v: any = JSON.parse(raw);
+                return v.access_token || v.accessToken || v.token
+                  || (v.currentSession && v.currentSession.access_token)
+                  || (v.state && (v.state.accessToken || v.state.access_token
+                       || (v.state.tokens && (v.state.tokens.accessToken || v.state.tokens.access_token)))) || "";
+              } catch { return /^[\w-]+\.[\w-]+\.[\w-]+$/.test(raw) ? raw : ""; } // bare JWT string
+            };
+            try {
+              let tok = "";
+              if (storageKey) { // exact key first, then substring match
+                const k = localStorage.getItem(storageKey) != null ? storageKey : Object.keys(localStorage).find((x) => x.includes(storageKey));
+                if (k) tok = pickTok(localStorage.getItem(k));
+              }
+              if (!tok) { const k = Object.keys(localStorage).find((x) => x.startsWith("sb-") && x.endsWith("-auth-token")); if (k) tok = pickTok(localStorage.getItem(k)); }
+              if (tok) authHeader = "Bearer " + tok;
+            } catch {}
+          }
           const headers: any = { "Content-Type": "application/json" };
           if (authHeader) headers["Authorization"] = authHeader;
           const r = await fetch(url, { method, headers, body, credentials: "include" });
           const t = await r.text();
           return { status: r.status, body: t.slice(0, 2500) };
-        }, { url, method, body, auth: capturedAuth });
+        }, { url, method, body, auth: capturedAuth, storageKey: AUTH_STORAGE_KEY, allowAuth });
       } catch (e: any) { res = { status: 0, body: "request failed: " + (e?.message || e) }; }
       trace.push({ n: calls, action: { type: "api" }, observation: `${method} ${rawPath} → ${res.status}`, result: String(res.body).slice(0, 200) });
       return text(`API ${method} ${url} → HTTP ${res.status}\n${res.body}${budgetNote()}`);
