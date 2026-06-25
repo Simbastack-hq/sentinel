@@ -179,14 +179,16 @@ uninstall_launchd(){
 }
 
 # --- Linux: systemd --user timer (preferred) ---
+# Returns non-zero (instead of die) so install_linux can fall back to cron on older/edge systemd.
 install_systemd(){
   local d="$HOME/.config/systemd/user"; mkdir -p "$d"
   render_tmpl "$SENTINEL_HOME/systemd/sentinel.service" "$d/sentinel.service"
   render_tmpl "$SENTINEL_HOME/systemd/sentinel.timer"   "$d/sentinel.timer"
-  systemctl --user daemon-reload
-  systemctl --user enable --now sentinel.timer || die "systemctl --user enable failed (no user systemd session? cron is the fallback)"
-  if loginctl enable-linger "$USER" 2>/dev/null; then echo "linger enabled (timer runs while you're logged out)"
-  else echo "note: run 'sudo loginctl enable-linger $USER' so the timer runs when you're logged out"; fi
+  systemctl --user daemon-reload 2>/dev/null
+  systemctl --user enable --now sentinel.timer 2>/dev/null || { echo "systemctl --user enable failed"; return 1; }
+  local u="${USER:-$(id -un)}"
+  if loginctl enable-linger "$u" 2>/dev/null; then echo "linger enabled (timer runs while you're logged out)"
+  else echo "note: run 'sudo loginctl enable-linger $u' so the timer runs when you're logged out"; fi
   echo "loaded systemd timer: ticks every ${SCHEDULER_INTERVAL}s → $VAR/scheduler.log  (status: systemctl --user status sentinel.timer)"
 }
 uninstall_systemd(){
@@ -198,9 +200,14 @@ uninstall_systemd(){
 # --- Linux: cron (fallback when no user systemd session, e.g. minimal containers) ---
 install_cron(){
   local mins=$(( (SCHEDULER_INTERVAL + 59) / 60 )); [ "$mins" -lt 1 ] && mins=1
-  local line="*/$mins * * * * SENTINEL_HOME='$SENTINEL_HOME' PATH='$PATH' /bin/bash -c 'exec \"$SENTINEL_HOME/bin/sentinel\" tick' >> '$SENTINEL_HOME/var/scheduler.log' 2>&1 # com.sentinel.scheduler"
+  # Build a VALID cron expression: minute-step under an hour, else an hour-step (cron can't do >59 in a field).
+  local sched human
+  if [ "$mins" -le 59 ]; then sched="*/$mins * * * *"; human="${mins}m"
+  else local hrs=$(( (mins + 59) / 60 )); [ "$hrs" -gt 23 ] && hrs=23; sched="0 */$hrs * * *"; human="${hrs}h"; fi
+  # Call the script directly (its shebang picks bash) — no hardcoded /bin/bash, works on non-FHS systems.
+  local line="$sched SENTINEL_HOME='$SENTINEL_HOME' PATH='$PATH' '$SENTINEL_HOME/bin/sentinel' tick >> '$SENTINEL_HOME/var/scheduler.log' 2>&1 # com.sentinel.scheduler"
   ( crontab -l 2>/dev/null | grep -v 'com.sentinel.scheduler'; echo "$line" ) | crontab - \
-    && echo "installed cron entry: ticks every ${mins}m (crontab -l). NOTE: cron granularity is whole minutes." \
+    && echo "installed cron entry: ticks every ${human} (crontab -l). NOTE: cron granularity is whole minutes." \
     || die "crontab install failed"
 }
 uninstall_cron(){
@@ -208,8 +215,11 @@ uninstall_cron(){
 }
 
 install_linux(){
-  if have systemctl && systemctl --user show-environment >/dev/null 2>&1; then install_systemd
-  elif have crontab; then echo "no user systemd session — falling back to cron"; install_cron
+  if have systemctl && systemctl --user show-environment >/dev/null 2>&1; then
+    install_systemd && return 0
+    echo "systemd timer setup failed — falling back to cron"
+  fi
+  if have crontab; then install_cron
   else die "no scheduler backend: need systemd (with a user session) or cron"; fi
 }
 uninstall_linux(){

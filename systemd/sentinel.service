@@ -10,7 +10,7 @@ Type=oneshot
 WorkingDirectory=__SENTINEL_HOME__
 Environment=PATH=__PATH__
 Environment=SENTINEL_HOME=__SENTINEL_HOME__
-ExecStart=/bin/bash -c 'exec "__SENTINEL_HOME__/bin/sentinel" tick'
+ExecStart=__SENTINEL_HOME__/bin/sentinel tick
 # Mirror launchd's LowPriorityIO + Nice 5 so QA runs stay out of the way.
 Nice=5
 IOSchedulingClass=idle
