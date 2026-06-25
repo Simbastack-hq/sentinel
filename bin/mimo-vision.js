@@ -34,6 +34,7 @@ function getKey() {
   if (!prompt) { try { prompt = fs.readFileSync(0, 'utf8').trim(); } catch {} }
   if (!imgPath || !prompt) { console.error('usage: mimo-vision.js <image> "<prompt>"'); process.exit(2); }
   if (!fs.existsSync(imgPath)) { console.error('mimo-vision: image not found: ' + imgPath); process.exit(2); }
+  if (!!process.env.VISION_API_KEY !== !!process.env.VISION_BASE_URL) { console.error('mimo-vision: set VISION_API_KEY and VISION_BASE_URL together (they pair as one provider)'); process.exit(3); }
   const key = getKey();
   if (!key) { console.error('mimo-vision: no vision API key (set VISION_API_KEY for a custom VISION_BASE_URL, else XIAOMI_API_KEY or ~/.pi/agent/auth.json)'); process.exit(3); }
   if (!MODEL) { console.error('mimo-vision: set VISION_MODEL when using a non-default VISION_BASE_URL'); process.exit(3); }

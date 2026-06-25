@@ -87,6 +87,7 @@ async function pool(items, n, fn) {
 (async () => {
   const o = parseArgs();
   if (!o.report || !o.out) { console.error('usage: uiux-review --report <report.json> --out <dir>'); process.exit(2); }
+  if (!!process.env.VISION_API_KEY !== !!process.env.VISION_BASE_URL) { console.error('uiux-review: set VISION_API_KEY and VISION_BASE_URL together (they pair as one provider)'); process.exit(3); }
   if (!getKey()) { console.error('uiux-review: no vision API key (set VISION_API_KEY for a custom VISION_BASE_URL, else XIAOMI_API_KEY or ~/.pi/agent/auth.json)'); process.exit(3); }
   if (!MODEL) { console.error('uiux-review: set VISION_MODEL when using a non-default VISION_BASE_URL'); process.exit(3); }
   let rep; try { rep = JSON.parse(fs.readFileSync(o.report, 'utf8')); } catch { console.error('uiux-review: bad report.json'); process.exit(2); }
