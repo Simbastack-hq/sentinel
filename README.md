@@ -187,7 +187,7 @@ For apps gated behind MetaMask/Rabby, `qa.app.web3` injects a programmatic walle
 ```json
 "web3": {
   "enabled": true, "rpc": "...", "chain_id": 42161,
-  "private_key_env": "PEAR_QA_WALLET_PK",   // env-var NAME; the key lives in config/sentinel.env, never here
+  "private_key_env": "MYAPP_QA_WALLET_PK",  // env-var NAME; the key lives in config/sentinel.env, never here
   "allow_funded": true                       // permit a key with on-chain balance/nonce (relaxes the unfunded preflight)
 }
 ```

@@ -25,7 +25,7 @@ const LOGIN_PATH = process.env.QA_LOGIN_PATH || "/login";
 const API_BASE = process.env.QA_API_BASE || ""; // backend API base for assertions (e.g. http://localhost:4000)
 // Backend-auth capture is configurable so non-Supabase / non-"/api/" apps work too.
 // QA_AUTH_URL_RE: JS regex matched against request URLs to sniff the app's own Authorization header
-//   (default "/api/"; e.g. "pearprotocol\\.io|/v1/" for an app whose API lives on another host/path).
+//   (default "/api/"; e.g. "api\\.myapp\\.com|/v1/" for an app whose API lives on another host/path).
 // QA_AUTH_STORAGE_KEY: a localStorage key (substring) to read a bearer token from when no header was sniffed.
 const AUTH_URL_RE: RegExp = (() => { try { return new RegExp(process.env.QA_AUTH_URL_RE || "/api/"); } catch { return /\/api\//; } })();
 const AUTH_STORAGE_KEY = process.env.QA_AUTH_STORAGE_KEY || "";
