@@ -132,6 +132,7 @@ See [`config/targets.json.example`](config/targets.json.example). Key `qa.app` f
 | field | meaning |
 |---|---|
 | `engine` | `flow` (autonomous deep FE+BE) · `pi-native` (single-goal explore) · `node-loop` (deterministic) |
+| `base_url` | QA an **already-deployed** app at this URL instead of booting locally (no `start_cmd`/`port` needed) — see below |
 | `start_cmd`, `port`, `health_path` | how to boot the app + the URL to health-check |
 | `set_port:false` | multi-process stacks (web+api) — don't force one `PORT` on every child |
 | `aux_ports` | extra services to wait for + reap (e.g. the API on `4000`) |
@@ -141,6 +142,24 @@ See [`config/targets.json.example`](config/targets.json.example). Key `qa.app` f
 | `goal` | (pi-native/node-loop only) what to exercise |
 | `branch` + `worktree:true` | QA a *different* branch in a throwaway `git worktree` (real working tree untouched); `install_cmd` + `qa_env` (a gitignored `.env` dropped in as `.env.local`) |
 | `web3` | QA a wallet-gated dApp: inject an **unfunded burner** wallet + stub gate endpoints — see below |
+
+### QA a live/deployed app (no local boot)
+
+Set `base_url` to test an app that's **already running** — a staging deploy, a preview URL, or production — instead of booting it locally. `recon` still reads the local repo to derive the flows; Sentinel just drives the remote origin and asserts its `api_base`. `start_cmd`/`port`/boot/teardown are skipped.
+
+```json
+"qa": {
+  "enabled": true, "cadence": "every:12h",
+  "app": {
+    "engine": "flow",
+    "base_url": "https://staging.example.com",
+    "api_base": "https://api.example.com",
+    "health_path": "/"
+  }
+}
+```
+
+The `path` at the target level still points at the local repo (for `recon`). Combine with `web3` to drive a deployed wallet-gated dApp. ⚠️ Pointing `base_url` at **production** means QA acts on live data — scope the `goal`/flows to read-only or non-destructive actions accordingly.
 
 ### QA for wallet dApps (web3 mode)
 
