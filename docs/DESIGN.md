@@ -57,6 +57,8 @@ Pipeline per run:
 
 Shared boot path (in `agents/qa.sh`): pre-check every port is free (won't boot over / kill a process it didn't start) → boot `start_cmd` on localhost (plain background boot so interactive dev servers like `next dev` survive — a detached session would kill them) → health-check the web port → wait for `aux_ports` (e.g. the API) → run the engine → tear down the **whole process tree** (kill the boot pid + children, reap the ports, and `pkill` by repo path/basename to catch `pnpm --filter`/`tsx watch` stragglers).
 
+**Remote mode (`base_url`):** to QA an already-deployed app (staging/preview/prod), set `base_url` and the boot/teardown path is skipped entirely — Sentinel just confirms the URL answers and drives it. `recon` still runs against the local repo to derive the flows, so flow quality is unchanged; only the *target* moves from a local process to a live origin. `api_base` defaults to `base_url` when unset.
+
 ### node-loop (v1)
 A deterministic Node loop (`bin/qa-drive.js`) owns control flow; Mimo is a **toolless one-shot brain** (`pi -nt`) called once per step (observe DOM → decide action → Playwright executes). Cheapest, most predictable.
 
