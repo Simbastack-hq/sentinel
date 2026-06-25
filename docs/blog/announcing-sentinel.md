@@ -64,13 +64,25 @@ You don't write or maintain a single test. You point it at a repo, it comprehend
 
 And we didn't paper over the awkward part. A single autonomous run is a coin flip on depth, so we engineered around it with multi-attempt unioning and a hard per-attempt step budget that keeps a run both deep and bounded in cost.
 
+## The hard one: QA an app you can't even log into
+
+Plenty of apps don't have a login form. They have a Connect Wallet button, and everything past it is gated behind MetaMask or Rabby. A headless agent can't click a browser-extension popup, so for a while those apps were out of reach.
+
+The way in was cleaner than we expected, and it never touched the app's code. A web3 app talks to its wallet through a standard interface: `window.ethereum`, or for newer apps an EIP-6963 announcement the wallet broadcasts to the page. So before the page loads, Sentinel injects its own implementation of that interface, backed by a throwaway private key it keeps in Node. To the app it looks like an ordinary MetaMask. To us it's a wallet the agent can drive, so the app connects, reads the chain, and signs exactly as it would for a real person, and the key never crosses into the page.
+
+The catch is that these are real apps on a real chain with real money. Point a funded wallet at a live exchange and "QA" can quietly become "opened a leveraged position." So the wallet is a freshly generated, unfunded burner, and we made spending impossible even under misconfiguration: no method that submits a transaction is ever forwarded to the network, full stop. We had an adversarial pass go hunting for holes in that promise, and it paid for itself. The first cut checked the wallet's balance and bailed if it held funds, but the check passed silently whenever the balance lookup failed, which is precisely the moment you'd want it to stop. We fixed it to fail closed, then stopped trusting the balance at all: broadcasting is blocked by method name, structurally, so funding doesn't enter into it. Reads go through, sends never do, and a key that has ever been used aborts the run.
+
+Then we pointed it at a live perpetuals exchange on Arbitrum, and the boring problems arrived on schedule. The landing page fetched a backend during server rendering, so with no backend it returned a 500 and the health check never went green; we started the agent on the trading route instead. The public RPC handed back a malformed CORS header, so the app's own on-chain reads failed and the console filled with tens of thousands of errors; we routed those RPC calls back through Node, where CORS doesn't apply and we could retry the flaky ones. A wallet SDK with a placeholder project id threw an error that tripped the framework's full-screen dev overlay, and the overlay silently swallowed every click, so the agent declared the whole page broken; we tore the overlay down and capped the error stream so a noisy app can't bury a run again.
+
+What came out was a real report. On an unfunded burner the agent connected, opened the isolated-margin trade screen, and worked the form like a tester: no order preview after entering collateral, no slippage control anywhere in the UI, no balance check (it typed 999,999 and the form shrugged), a wallet connection that silently dropped when you switched margin modes, a leverage slider leaking an internal id as its label, and a negative amount the validation only half-caught. Nine functional bugs and thirteen design findings in a forty-nine-step session, for twenty-eight cents, with not one transaction ever reaching the chain.
+
 ## The stack
 
 Sentinel is deliberately boring to operate: bash and Node scripts, a launchd scheduler, and the CLIs it shells out to. There's no service to host and no database of its own, and you can read the whole thing in an afternoon. That last part is on purpose; an unattended agent you can't audit is one you shouldn't be running.
 
 ## What it can't do yet
 
-It isn't magic. Exploration still varies run to run, which is why we run several attempts. Booting a complex stack takes the right config: ports, auth, a test database, and you should never point write-capable QA at production data. Depth trades off against time and cost, both of them knobs you set. We'd rather write that down than sell you perfection.
+It isn't magic. Exploration still varies run to run, which is why we run several attempts. Booting a complex stack takes the right config: ports, auth, a test database, and you should never point write-capable QA at production data. Depth trades off against time and cost, both of them knobs you set. For wallet apps it drives an unfunded burner, so it tests everything up to the moment of settlement, not a trade actually filling; a local chain fork lifts that when you need it. We'd rather write that down than sell you perfection.
 
 ## Try it
 

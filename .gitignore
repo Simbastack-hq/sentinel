@@ -2,6 +2,7 @@
 var/
 config/sentinel.env
 config/targets.json
+config/*.qa.env
 node_modules/
 .DS_Store
 *.log

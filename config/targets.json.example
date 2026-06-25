@@ -55,6 +55,47 @@
         "review": { "enabled": false, "cadence": "on-commit" },
         "brain-sync": { "enabled": true, "cadence": "every:24h" }
       }
+    },
+
+    "_example_web3_wallet_dapp": {
+      "_comment": "QA a wallet-gated dApp (MetaMask/Rabby). Sentinel injects an UNFUNDED burner wallet so the agent can connect + drive the UI WITHOUT touching app code; no transaction is ever broadcast (read-only RPC allow-list + deny-by-prefix + fail-closed preflight). The whitelist stub AES-encrypts the burner into the app's own NEXT_PUBLIC_CRYPTO_KEY (read from the QA .env) at the __WL_ADDR__ token. Optionally boot a branch where the gated UI is live, in a throwaway worktree. Use a local `anvil --fork-url` RPC if you want real on-chain execution with fake money.",
+      "path": "/Users/you/projects/my-dapp",
+      "github": "",
+      "base": "main",
+      "ai_allowed": true,
+      "agents": {
+        "qa": {
+          "enabled": true,
+          "cadence": "every:24h",
+          "app": {
+            "engine": "pi-native",
+            "branch": "feature/live-ui",
+            "worktree": true,
+            "install_cmd": "yarn install --frozen-lockfile",
+            "qa_env": "config/my-dapp.qa.env",
+            "start_cmd": "yarn dev",
+            "port": 3000,
+            "host": "localhost",
+            "health_path": "/app",
+            "start_path": "/app",
+            "boot_timeout": 180,
+            "max_steps": 30,
+            "uiux_review": true,
+            "web3": {
+              "enabled": true,
+              "rpc": "https://arb1.arbitrum.io/rpc",
+              "chain_id": 42161,
+              "stubs": [
+                { "url": "**/api/records*", "whitelist": true, "json": { "data": [{ "fields": { "Address": "__WL_ADDR__" } }] } },
+                { "url": "**/api/country*", "json": { "message": "YES" } },
+                { "url": "**/*.walletconnect.com/**", "abort": true }
+              ]
+            },
+            "goal": "Connect the injected MetaMask wallet, then exercise the core flow. The burner is UNFUNDED, so on-chain submission failing with 'insufficient funds' is EXPECTED, not a bug — focus on rendering, quotes/validation, and how the UI handles the unfunded state. Ignore WalletConnect relay/socket console errors (QA-env artifact)."
+          }
+        },
+        "review": { "enabled": false, "cadence": "on-commit" }
+      }
     }
 
   }

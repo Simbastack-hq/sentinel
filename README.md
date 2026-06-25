@@ -139,6 +139,28 @@ See [`config/targets.json.example`](config/targets.json.example). Key `qa.app` f
 | `api_base` | backend base URL for the flow engine's `api_request` assertions |
 | `login` | `{path, email_env, password_env}` — Playwright fills the form from env vars (never sent to the model or logged) |
 | `goal` | (pi-native/node-loop only) what to exercise |
+| `branch` + `worktree:true` | QA a *different* branch in a throwaway `git worktree` (real working tree untouched); `install_cmd` + `qa_env` (a gitignored `.env` dropped in as `.env.local`) |
+| `web3` | QA a wallet-gated dApp: inject an **unfunded burner** wallet + stub gate endpoints — see below |
+
+### QA for wallet dApps (web3 mode)
+
+For apps gated behind MetaMask/Rabby, `qa.app.web3` injects a programmatic wallet so the agent can connect and exercise the UI — **without touching the app's code**. It's built to be safe by construction: a **fresh unfunded burner** key held only in Node (never in the page/model/logs), **no transaction is ever broadcast** (deny-by-prefix + a read-only RPC allow-list), and a **fail-closed preflight** aborts if the key is ever funded/used. Gate endpoints (whitelist/geo/health) are stubbed at the network layer.
+
+```json
+"web3": {
+  "enabled": true,
+  "rpc": "https://arb1.arbitrum.io/rpc",     // chain reads (use a keyed/private RPC or an anvil fork for reliability)
+  "chain_id": 42161,
+  "stubs": [
+    { "url": "**/api/records*", "whitelist": true, "json": { "data": [{ "fields": { "Address": "__WL_ADDR__" } }] } },
+    { "url": "**/api/country*", "json": { "message": "YES" } }
+  ]
+}
+```
+
+`whitelist:true` splices the burner address (AES-encrypted with the app's own `NEXT_PUBLIC_CRYPTO_KEY`, read from the QA `.env`) into the `__WL_ADDR__` token so the app sees it as whitelisted. `branch` + `worktree:true` let you QA a branch where the gated UI is live, in a throwaway worktree. The full design is in [`docs/DESIGN.md`](docs/DESIGN.md) (§5c). For real on-chain *execution* without real money, point `rpc` at a local `anvil --fork-url`.
+
+Proven against a live wallet-gated perpetuals exchange frontend on Arbitrum: from an unfunded burner the agent connected, opened the trade screen, and surfaced **9 functional bugs + 13 UI/UX findings** in a 49-step session for ~$0.28 — with **no transaction ever broadcast**.
 
 Credentials referenced by `email_env`/`password_env` live only in `config/sentinel.env` (gitignored), keyed by the **name** you put in `targets.json`.
 
