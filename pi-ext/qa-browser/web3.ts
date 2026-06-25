@@ -224,24 +224,37 @@ export async function installWeb3(page: Page, cfg: Web3Config, stubs: StubConfig
   // construction and broadcasting is blocked STRUCTURALLY below regardless of balance.
   const ABORT = (m: string) => { throw new Error("SENTINEL SAFETY ABORT: " + m); };
   const allowFunded = !!cfg.allowFunded; // explicit opt-in for a capped canary wallet (still no broadcasts)
+  // allow_funded means "I'm pointing at a specific, possibly-funded canary" — it MUST be a real supplied key,
+  // never a silently-generated fresh burner mislabeled as funded.
+  if (allowFunded && !supplied) ABORT("allow_funded is set but no valid private key was supplied (set web3.private_key_env → a 0x + 64-hex key)");
+
+  // (1) chainId is ALWAYS verified — a mismatch always aborts (wrong-RPC / cross-chain-replay risk). When the
+  // RPC can't be reached to verify it, fail CLOSED for a supplied/funded key (we can't confirm the chain); for a
+  // freshly generated unfunded burner an unreachable RPC stays non-fatal (unfunded by construction, no broadcast).
   try {
     const cid = await rpcCall(cfg.rpcUrl, "eth_chainId", []);
     if (parseInt(String(cid), 16) !== cfg.chainId) ABORT(`RPC chainId ${cid} != configured ${cfg.chainId} (wrong-RPC preflight risk)`);
-    if (!allowFunded) {
+  } catch (e: any) {
+    if (String(e?.message || e).includes("SENTINEL SAFETY ABORT")) throw e;
+    if (supplied || allowFunded) ABORT(`could not verify RPC chainId for a supplied/funded key (RPC error: ${String(e?.message || e).slice(0, 120)})`);
+  }
+
+  // (2) Unfunded preflight — balance + nonce must be zero. SKIPPED only when allow_funded (a capped canary is
+  // permitted to hold a balance). The broadcast deny-list below still blocks every on-chain tx regardless.
+  if (!allowFunded) {
+    try {
       const b = await rpcCall(cfg.rpcUrl, "eth_getBalance", [address, "latest"]);
       if (!/^0x[0-9a-fA-F]+$/.test(String(b))) ABORT(`eth_getBalance returned a non-quantity (${b}); cannot confirm the burner is unfunded`);
       if (BigInt(b) > 0n) ABORT(`burner ${address} has a nonzero balance (${b}) on chain ${cfg.chainId}`);
       const n = await rpcCall(cfg.rpcUrl, "eth_getTransactionCount", [address, "latest"]);
       if (!/^0x0*$/.test(String(n))) ABORT(`burner ${address} has a nonzero nonce (${n}) — it has transacted before`);
-    } else {
-      // allow_funded: a funded/used key is permitted (e.g. a small capped canary that's pre-funded on the venue).
-      // The unfunded preflight is skipped, but the broadcast deny-list below STILL blocks every on-chain tx.
-      console.error(`sentinel web3: allow_funded set — NOT enforcing the unfunded preflight for ${address}. Broadcasts remain blocked; keep this wallet's balance small/capped.`);
+    } catch (e: any) {
+      if (String(e?.message || e).includes("SENTINEL SAFETY ABORT")) throw e; // affirmative danger → always abort
+      if (supplied) ABORT(`could not verify the supplied WEB3_PK burner is unfunded (RPC error: ${String(e?.message || e).slice(0, 120)})`);
+      // generated fresh key + flaky RPC → safe to proceed (unfunded by construction; broadcast blocked below)
     }
-  } catch (e: any) {
-    if (String(e?.message || e).includes("SENTINEL SAFETY ABORT")) throw e; // affirmative danger → always abort
-    if (supplied && !allowFunded) ABORT(`could not verify the supplied WEB3_PK burner is unfunded (RPC error: ${String(e?.message || e).slice(0, 120)})`);
-    // generated fresh key, or allow_funded opt-in, + flaky RPC → safe to proceed (broadcast blocked below)
+  } else {
+    console.error(`sentinel web3: allow_funded set — NOT enforcing the unfunded preflight for ${address}. Broadcasts remain blocked; keep this wallet's balance small/capped.`);
   }
 
   // Broadcast deny-list (prefix, case-insensitive): NO method that submits or authorizes a transaction is
