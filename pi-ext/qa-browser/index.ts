@@ -349,14 +349,15 @@ export default function (pi: ExtensionAPI) {
       const url = /^https?:/.test(rawPath) ? rawPath : API_BASE.replace(/\/$/, "") + (rawPath.startsWith("/") ? "" : "/") + rawPath;
       const method = String(params.method || "GET").toUpperCase();
       const body = params.body && String(params.body).trim() ? String(params.body) : undefined;
-      // SECURITY: only forward the app's bearer to a TRUSTED destination — the API base origin, the page's own
-      // origin, or a URL matching the capture regex. Stops a model-supplied absolute URL from exfiltrating the token.
+      // SECURITY: only forward the app's bearer to a TRUSTED ORIGIN — the API base origin or the page's own
+      // origin. A model-supplied absolute URL to any other host gets no token (the capture regex is for
+      // sniffing the app's own traffic, NOT a forwarding allowlist — "/api/" would match evil.tld/api/...).
       const allowAuth = (() => {
         try {
           const dest = new URL(url).origin;
           const apiOrigin = API_BASE ? new URL(API_BASE).origin : "";
           let pageOrigin = ""; try { pageOrigin = new URL(BASE).origin; } catch {}
-          return (!!apiOrigin && dest === apiOrigin) || (!!pageOrigin && dest === pageOrigin) || AUTH_URL_RE.test(url);
+          return (!!apiOrigin && dest === apiOrigin) || (!!pageOrigin && dest === pageOrigin);
         } catch { return false; }
       })();
       let res: any;
