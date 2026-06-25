@@ -349,13 +349,24 @@ export default function (pi: ExtensionAPI) {
       const url = /^https?:/.test(rawPath) ? rawPath : API_BASE.replace(/\/$/, "") + (rawPath.startsWith("/") ? "" : "/") + rawPath;
       const method = String(params.method || "GET").toUpperCase();
       const body = params.body && String(params.body).trim() ? String(params.body) : undefined;
+      // SECURITY: only forward the app's bearer to a TRUSTED destination — the API base origin, the page's own
+      // origin, or a URL matching the capture regex. Stops a model-supplied absolute URL from exfiltrating the token.
+      const allowAuth = (() => {
+        try {
+          const dest = new URL(url).origin;
+          const apiOrigin = API_BASE ? new URL(API_BASE).origin : "";
+          let pageOrigin = ""; try { pageOrigin = new URL(BASE).origin; } catch {}
+          return (!!apiOrigin && dest === apiOrigin) || (!!pageOrigin && dest === pageOrigin) || AUTH_URL_RE.test(url);
+        } catch { return false; }
+      })();
       let res: any;
       try {
         // fetch from INSIDE the page → inherits the app origin + auth. Prefer the sniffed header; else read a
-        // bearer token from localStorage (configured key first, then the Supabase default shape).
-        res = await p.evaluate(async ({ url, method, body, auth, storageKey }: any) => {
-          let authHeader = auth || "";
-          if (!authHeader) {
+        // bearer token from localStorage (configured key first, then the Supabase default shape). Bearer is
+        // attached ONLY when allowAuth (trusted destination); cookies (credentials:include) are origin-scoped anyway.
+        res = await p.evaluate(async ({ url, method, body, auth, storageKey, allowAuth }: any) => {
+          let authHeader = allowAuth ? (auth || "") : "";
+          if (!authHeader && allowAuth) {
             // Pull an access token out of common localStorage shapes (Supabase, Zustand-persist, plain JWT).
             const pickTok = (raw: string | null): string => {
               if (!raw) return "";
@@ -369,7 +380,10 @@ export default function (pi: ExtensionAPI) {
             };
             try {
               let tok = "";
-              if (storageKey) { const k = Object.keys(localStorage).find((x) => x.includes(storageKey)); if (k) tok = pickTok(localStorage.getItem(k)); }
+              if (storageKey) { // exact key first, then substring match
+                const k = localStorage.getItem(storageKey) != null ? storageKey : Object.keys(localStorage).find((x) => x.includes(storageKey));
+                if (k) tok = pickTok(localStorage.getItem(k));
+              }
               if (!tok) { const k = Object.keys(localStorage).find((x) => x.startsWith("sb-") && x.endsWith("-auth-token")); if (k) tok = pickTok(localStorage.getItem(k)); }
               if (tok) authHeader = "Bearer " + tok;
             } catch {}
@@ -379,7 +393,7 @@ export default function (pi: ExtensionAPI) {
           const r = await fetch(url, { method, headers, body, credentials: "include" });
           const t = await r.text();
           return { status: r.status, body: t.slice(0, 2500) };
-        }, { url, method, body, auth: capturedAuth, storageKey: AUTH_STORAGE_KEY });
+        }, { url, method, body, auth: capturedAuth, storageKey: AUTH_STORAGE_KEY, allowAuth });
       } catch (e: any) { res = { status: 0, body: "request failed: " + (e?.message || e) }; }
       trace.push({ n: calls, action: { type: "api" }, observation: `${method} ${rawPath} → ${res.status}`, result: String(res.body).slice(0, 200) });
       return text(`API ${method} ${url} → HTTP ${res.status}\n${res.body}${budgetNote()}`);
