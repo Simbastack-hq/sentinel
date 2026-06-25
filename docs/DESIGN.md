@@ -7,7 +7,7 @@ dependencies, only the CLIs it shells out to (`pi`/Mimo, `claude`, `codex`, `gh`
 ## 1. The heartbeat
 
 ```
-launchd ──(every SCHEDULER_INTERVAL, default 900s)──▶ sentinel tick
+scheduler ──(every SCHEDULER_INTERVAL, default 900s)──▶ sentinel tick
                                           │ single-flight lock (var/locks/tick.lock) — ticks never overlap
                                           ▼
                   for each target × enabled agent:
@@ -26,6 +26,7 @@ launchd ──(every SCHEDULER_INTERVAL, default 900s)──▶ sentinel tick
 - **`lib/common.sh`** is the contract: env loading (caller wins; inline comments stripped; command-substitution blocked), ntfy, `targets.json` accessors, per-(target,agent) state, cadence evaluation, locking, `run_to` (timeout wrapper).
 - **`bin/sentinel`** is the CLI + orchestration. `tick` is the heartbeat; `run` forces one agent.
 - **`agents/*.sh`** are pure: read env, do work, emit `report.md` + `result.json`.
+- **Scheduler is OS-portable.** `sentinel install` picks the backend from `uname -s`: **launchd** on macOS (`launchd/com.sentinel.scheduler.plist`, `StartInterval`), **systemd `--user` timer** on Linux (`systemd/sentinel.{service,timer}`, `OnUnitActiveSec` + `Persistent=true`, with `loginctl enable-linger` so it runs headless), falling back to **cron** when no user-systemd session exists. All three just fire `sentinel tick` on an interval and append to `var/scheduler.log`; `tick` itself, the agents, and `run_to` (which prefers `gtimeout`, else `timeout`) are platform-agnostic.
 
 **Cadence:** `on-commit` compares `git HEAD` to the stored `lastRunSha`; `every:<dur>` compares `now − lastRunEpoch`. State in `var/state/` survives reboots.
 

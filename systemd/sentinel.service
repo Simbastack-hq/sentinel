@@ -1,0 +1,18 @@
+# Template installed to ~/.config/systemd/user/sentinel.service by `sentinel install` on Linux
+# (it fills in the home path + PATH). Triggered by sentinel.timer; the systemd equivalent of the launchd plist.
+[Unit]
+Description=Sentinel — evaluate cadences and run any due agents (heartbeat)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__SENTINEL_HOME__
+Environment=PATH=__PATH__
+Environment=SENTINEL_HOME=__SENTINEL_HOME__
+ExecStart=__SENTINEL_HOME__/bin/sentinel tick
+# Mirror launchd's LowPriorityIO + Nice 5 so QA runs stay out of the way.
+Nice=5
+IOSchedulingClass=idle
+StandardOutput=append:__SENTINEL_HOME__/var/scheduler.log
+StandardError=append:__SENTINEL_HOME__/var/scheduler.log

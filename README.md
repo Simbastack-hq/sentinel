@@ -71,8 +71,9 @@ Full architecture: [`docs/DESIGN.md`](docs/DESIGN.md).
 Installed and on `PATH`:
 
 - **[pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)** — the agent harness, authed for the **Xiaomi/Mimo** provider (`pi` uses `~/.pi/agent/auth.json`; the vision helpers read `.xiaomi.key` from there, or `$XIAOMI_API_KEY`).
-- **node** ≥ 20, **jq**, **git**, **gh** (authed: `gh auth login`), **curl**, **lsof**, **gtimeout** (`brew install coreutils`), **python3**.
-- **Playwright** (installed by `npm install`; reuses the shared chromium cache).
+- **node** ≥ 20, **jq**, **git**, **gh** (authed: `gh auth login`), **curl**, **lsof**, **python3**, and **timeout** (Linux: in coreutils, preinstalled; macOS: `gtimeout` via `brew install coreutils`).
+- **Playwright** (installed by `npm install`; reuses the shared chromium cache). On Linux, install the browser system deps once: `npx playwright install --with-deps chromium`.
+- **OS:** macOS (launchd) or Linux (systemd `--user` timer, with a cron fallback). On a headless Linux server `sentinel install` runs `loginctl enable-linger` so the timer fires while you're logged out — if that needs root, run `sudo loginctl enable-linger $USER`.
 - For the agents you enable: **claude** (docs-sync, brain-sync, optional review), **codex** (optional review).
 - **brain-sync** also needs a local clone of the shared knowledge repo at `BRAIN_PATH` (origin matching `BRAIN_GITHUB`) and `gh` with write access to it. See [`examples/brain-scaffold/SETUP.md`](examples/brain-scaffold/SETUP.md).
 
@@ -91,7 +92,7 @@ cp config/targets.json.example config/targets.json   # register your repos
 
 bin/sentinel doctor                      # verify pi/claude/codex/gh/playwright/ntfy
 bin/sentinel run <target> qa             # try one run
-bin/sentinel install                     # load the 15-min launchd scheduler (24/7)
+bin/sentinel install                     # load the 15-min scheduler (24/7): launchd on macOS, systemd/cron on Linux
 ```
 
 `config/sentinel.env` and `config/targets.json` are **gitignored** — credentials and your registry stay local.
@@ -187,7 +188,8 @@ examples/   ready-to-copy targets.json registries + brain-repo scaffold (see exa
 lib/        common.sh  (shared: env, cadence, locking, accessors)
 pi-ext/     qa-browser/  (pi extension: Playwright-backed browser + api_request tools)
 config/     *.example  (copy to the real, gitignored files)
-launchd/    com.sentinel.scheduler.plist
+launchd/    com.sentinel.scheduler.plist   (macOS scheduler)
+systemd/    sentinel.service · sentinel.timer   (Linux scheduler)
 docs/       DESIGN.md
 ```
 
