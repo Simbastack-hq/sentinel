@@ -98,6 +98,25 @@ render-report.js  →  one combined report.html (flows, FE+BE bugs, UI/UX, links
 - **Login** (optional, `qa.app.login`): before exploration the extension navigates to the login path, fills email/password from env vars (Playwright `fill` + a hydration-safe retype, since React controlled inputs can drop a too-early fill), and submits. Credentials come from `config/sentinel.env` by env-var name — **never** placed in the model prompt, trace, or logs. A same-origin nav guard keeps the agent from wandering off and losing its session.
 - **UI/UX review:** `mimo-v2.5-pro` is text-only, so vision uses **`mimo-v2-omni`** via the Xiaomi API directly (pi only registers the text Mimo models). `uiux-review.js` sends each key screen with a structured rubric (hierarchy, spacing, contrast/WCAG, typography, consistency, usability/Nielsen, states, density) and parses JSON findings. (omni is a reasoning model — it needs generous `max_tokens` or it cuts off before emitting JSON.)
 
+## 5c. web3 / wallet-dApp QA (unfunded burner)
+
+Some apps gate everything behind a browser wallet (MetaMask/Rabby). A headless agent can't click a wallet extension, so `qa.app.web3` injects a programmatic wallet instead — **without modifying the app's code**.
+
+```
+agents/qa.sh                          pi-ext/qa-browser/web3.ts (installWeb3)
+  branch+worktree boot              →   page.addInitScript: window.ethereum shim + EIP-6963 announce
+  writes gitignored QA .env.local       page.exposeFunction(__sentinelWeb3): key stays in NODE
+  WEB3_* env → the extension        →   page.route: stub the gate endpoints (whitelist/geo/health)
+                                         ↑ all installed BEFORE the first navigation
+```
+
+- **The injected provider** lives at `window.ethereum` (with `isMetaMask`) and, for wagmi v2 / RainbowKit v2, announces itself over **EIP-6963** so the wallet picker lists and connects it. Every JSON-RPC call from the page is delegated to a Node-side handler (`exposeFunction`) backed by a viem account. **The private key never enters the page, DOM, model prompt, trace, report, or logs** — only the address crosses the boundary.
+- **No funds can move.** The key is a **fresh random unfunded burner** (per run). Broadcast is blocked **structurally**: a deny-by-prefix rule (`eth_send*`, `eth_signTransaction`, `wallet_send*`, `eth_submit*`) means no transaction is ever signed-and-sent, regardless of casing or funding; only an explicit **read-only allow-list** proxies to the RPC, anything else is refused. A **fail-closed preflight** asserts the burner is on the configured chain with **zero balance and zero nonce** (or aborts the run); message/typed-data signing is allowed (no money moves) but refused for a foreign `chainId`.
+- **Gate stubbing.** `web3.stubs` fulfills the app's gate endpoints at the network layer: a whitelist stub AES-encrypts the burner address with the app's own `NEXT_PUBLIC_CRYPTO_KEY` (single source of truth, read from the same QA `.env`) so the app decrypts it to a whitelisted address; geo/health stubs return allowed/healthy. No app code is touched.
+- **Branch + worktree boot.** `branch` + `worktree:true` boot a *different* branch (e.g. where the trade UI is live) in a throwaway `git worktree` — the real working tree is never touched — with a gitignored QA `.env.local` and a bounded `install_cmd`. The real backend is **never run**; a loopback-`MONGODB_URI` assertion refuses to drive if the QA env could reach a real DB.
+
+This tests the full wallet-gated frontend (connect → trade form → quotes/validation → the approve/open path) end to end; on-chain submission hits the unfunded wall (`insufficient funds`), which the goal tells the agent is **expected**, so it focuses on rendering/quote/validation/state bugs. For real on-chain *execution* without real money, point `web3.rpc` at a local `anvil --fork-url` of the chain (the deny-list still blocks accidental mainnet broadcast).
+
 ## 6. Models
 
 | Role | Model |

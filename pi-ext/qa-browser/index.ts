@@ -78,11 +78,43 @@ async function ensurePage(): Promise<Page> {
   browser = await chromium.launch({ headless: HEADLESS });
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 850 } });
   page = await ctx.newPage();
-  page.on("console", (m) => { if (m.type() === "error") consoleErrors.push(m.text().slice(0, 300)); });
-  page.on("pageerror", (e) => pageErrors.push((e.message || String(e)).slice(0, 300)));
-  page.on("requestfailed", (r) => { const f = r.failure(); failedRequests.push(`${r.method()} ${r.url().slice(0, 140)} — ${f ? f.errorText : "failed"}`); });
+  // Cap the buffers so a noisy app (e.g. a wallet SDK reconnect loop) can't blow up the report or context.
+  page.on("console", (m) => { if (m.type() === "error" && consoleErrors.length < 400) consoleErrors.push(m.text().slice(0, 300)); });
+  page.on("pageerror", (e) => { if (pageErrors.length < 400) pageErrors.push((e.message || String(e)).slice(0, 300)); });
+  page.on("requestfailed", (r) => { if (failedRequests.length < 400) { const f = r.failure(); failedRequests.push(`${r.method()} ${r.url().slice(0, 140)} — ${f ? f.errorText : "failed"}`); } });
   // Sniff the frontend's own API auth so api_request can authenticate exactly like the app does.
   page.on("request", (r) => { try { const a = r.headers()["authorization"]; if (a && /\/api\//.test(r.url())) capturedAuth = a; } catch {} });
+  // Web3 dApp QA: inject an UNFUNDED burner wallet at window.ethereum (key stays in Node, txs are NEVER
+  // broadcast) plus any gate stubs, BEFORE the first navigation so wagmi/ethers see the wallet at load.
+  if (process.env.WEB3_ENABLED === "1") {
+    try {
+      const { installWeb3 } = await import("./web3");
+      let stubs: any[] = [];
+      try { stubs = process.env.WEB3_STUBS ? JSON.parse(process.env.WEB3_STUBS) : []; } catch { stubs = []; }
+      const wlKey = process.env.WEB3_WL_KEY || "";
+      stubs = stubs.map((s: any) => (s && s.whitelist ? { ...s, whitelistKey: wlKey } : s));
+      const { address } = await installWeb3(page, {
+        rpcUrl: process.env.WEB3_RPC || "https://arb1.arbitrum.io/rpc",
+        chainId: parseInt(process.env.WEB3_CHAIN_ID || "42161", 10),
+        privateKey: process.env.WEB3_PK || undefined,
+      }, stubs);
+      // The address is an unfunded throwaway (safe to record). The private KEY never leaves Node.
+      trace.push({ n: 0, action: { type: "web3" }, observation: `injected unfunded burner ${address} on chain ${process.env.WEB3_CHAIN_ID || "42161"} (txs never broadcast)`, result: "no real funds can move", screenshot: "" });
+    } catch (e: any) {
+      const msg = String(e?.message || e);
+      // A tripped safety guard (a FUNDED/used key) must HARD-ABORT — never drive a wallet that could move
+      // money. Don't throw/close (that leaves a dead page the tools throw on): record the failure, write the
+      // report, and exhaust the step budget so every tool short-circuits to "call finish now". No wallet was
+      // injected, so nothing can be signed regardless.
+      if (msg.includes("SENTINEL SAFETY ABORT")) {
+        verdict = "fail"; summary = "SAFETY ABORT — " + msg.slice(0, 220);
+        trace.push({ n: 0, action: { type: "web3" }, observation: summary, result: "run aborted; no wallet injected", screenshot: "" });
+        calls = MAX_CALLS; writeReport();
+      } else {
+        trace.push({ n: 0, action: { type: "web3" }, observation: "web3 inject failed: " + msg.slice(0, 200), result: "", screenshot: "" });
+      }
+    }
+  }
   if (LOGIN_EMAIL && LOGIN_PASSWORD) {
     loginAttempted = true; loginOk = false;
     const loginUrl = BASE.replace(/\/$/, "") + LOGIN_PATH;
@@ -113,7 +145,10 @@ async function ensurePage(): Promise<Page> {
       trace.push({ n: 0, action: { type: "login" }, observation: "login error: " + String(e?.message || e).split("\n")[0].slice(0, 140), result: "", screenshot: "" });
     }
   } else {
-    try { await page.goto(BASE, { waitUntil: "domcontentloaded", timeout: 30000 }); } catch {}
+    // Start on QA_START_PATH (default "/"). Useful when "/" depends on a backend we don't run (SSR fetch),
+    // so QA begins on a client-rendered route (e.g. /trade) instead of a 500ing landing page.
+    const startUrl = BASE.replace(/\/$/, "") + (process.env.QA_START_PATH || "/");
+    try { await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 30000 }); } catch {}
   }
   await page.waitForTimeout(1000);
   return page;
@@ -124,7 +159,12 @@ function drainErrors(): string {
   const ne = all.slice(seenErr); seenErr = all.length;
   const nf = failedRequests.slice(seenFail); seenFail = failedRequests.length;
   const lines = ne.concat(nf.map((f) => "request failed: " + f));
-  return lines.length ? "\nNEW ERRORS:\n" + lines.map((l) => "- " + l).join("\n") : "";
+  if (!lines.length) return "";
+  // Dedup + cap so a noisy app can't flood the model context (and inflate cost) with repeated errors.
+  const seenK = new Set<string>(); const uniq: string[] = [];
+  for (const l of lines) { const k = l.slice(0, 80); if (!seenK.has(k)) { seenK.add(k); uniq.push(l); } if (uniq.length >= 12) break; }
+  const more = lines.length - uniq.length;
+  return `\nNEW ERRORS (${lines.length} this step):\n` + uniq.map((l) => "- " + l).join("\n") + (more > 0 ? `\n- …(+${more} more, deduped)` : "");
 }
 function budgetNote(): string {
   return calls >= MAX_CALLS ? "\n\n[BUDGET REACHED — call `finish` now with your verdict.]" : "";
@@ -183,7 +223,8 @@ export default function (pi: ExtensionAPI) {
     parameters: Type.Object({}),
     async execute() {
       const p = await ensurePage(); if (calls >= MAX_CALLS) return overBudgetMsg(); calls++;
-      const els: any[] = await p.evaluate(SNAP);
+      let els: any[] = [];
+      try { els = await p.evaluate(SNAP); } catch (e: any) { return text("page unavailable: " + String(e?.message || e).split("\n")[0].slice(0, 160) + " — call finish now with your verdict."); }
       const url = p.url(); let title = ""; try { title = await p.title(); } catch {}
       if (loginAttempted && !loginOk && url.includes(LOGIN_PATH)) {
         return text(`AUTO-LOGIN FAILED — you are on the login page and you do NOT have credentials to log in yourself. Do NOT fill or submit the login form. Call \`finish\` now with verdict "fail" and summary "automated login failed".`);

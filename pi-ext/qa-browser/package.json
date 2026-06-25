@@ -2,5 +2,8 @@
   "name": "sentinel-qa-browser",
   "private": true,
   "description": "pi extension: Playwright-backed browser tools so Mimo can drive QA in pi's native agent loop (v2)",
-  "dependencies": { "playwright": "1.60.0" }
+  "dependencies": {
+    "playwright": "1.60.0",
+    "viem": "^2.53.1"
+  }
 }

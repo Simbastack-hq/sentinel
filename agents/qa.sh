@@ -28,7 +28,62 @@ login_email=""; login_pw=""
 [ -n "$le_env" ] && login_email="${!le_env:-}"
 [ -n "$lp_env" ] && login_pw="${!lp_env:-}"
 
+# Branch / worktree boot (optional): QA a branch other than the checked-out one, in a THROWAWAY git
+# worktree — the target's real working tree is never touched. Deps install into the worktree.
+qa_branch="$(t_app "$TARGET" branch)"
+qa_worktree="$(t_app "$TARGET" worktree)"
+qa_install="$(t_app "$TARGET" install_cmd)"
+qa_env_file="$(t_app "$TARGET" qa_env)"   # gitignored .env dropped into the app dir as .env.local before boot
+case "$qa_env_file" in /*|"") : ;; *) qa_env_file="$SENTINEL_HOME/$qa_env_file" ;; esac
+start_path="$(t_app "$TARGET" start_path)"   # path the agent opens first (default "/"); use when "/" needs a backend
+# Web3 dApp mode (optional): inject an UNFUNDED burner wallet + gate stubs (see pi-ext/qa-browser/web3.ts).
+# The wallet key never enters the page/model/logs; transactions are never broadcast — no real funds can move.
+web3_enabled="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.enabled // false' "$TARGETS_JSON" 2>/dev/null)"
+web3_rpc="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.rpc // ""' "$TARGETS_JSON" 2>/dev/null)"
+web3_chain="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.chain_id // 42161' "$TARGETS_JSON" 2>/dev/null)"
+web3_stubs="$(jq -c --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.stubs // []' "$TARGETS_JSON" 2>/dev/null)"
+web3_on=""; web3_wl_key=""
+if [ "$web3_enabled" = true ]; then
+  web3_on=1
+  # The whitelist-stub passphrase MUST equal the app's NEXT_PUBLIC_CRYPTO_KEY — read it from the same QA .env
+  # so there is a single source of truth (no chance of drift between the stub and the app).
+  [ -n "$qa_env_file" ] && [ -f "$qa_env_file" ] && web3_wl_key="$(grep -m1 '^NEXT_PUBLIC_CRYPTO_KEY=' "$qa_env_file" 2>/dev/null | cut -d= -f2-)"
+fi
+
 if [ "$DRY_RUN" = 1 ]; then echo "[dry] would boot '$start_cmd' on 127.0.0.1:$port then drive $steps steps with $QA_MODEL"; echo "# qa dry-run" > "$rd/report.md"; result skipped "dry-run" 0 "" true "$head"; exit 0; fi
+
+# Optional: boot a DIFFERENT branch in a throwaway worktree (never touches the real working tree).
+orig_path="$path"; wt=""
+if [ "$qa_worktree" = true ] && [ -n "$qa_branch" ]; then
+  wt="$VAR/worktrees/$TARGET"
+  echo "preparing worktree for branch '$qa_branch' (real working tree untouched)..."
+  git -C "$orig_path" worktree remove --force "$wt" 2>/dev/null || true; rm -rf "$wt" 2>/dev/null
+  git -C "$orig_path" worktree prune 2>/dev/null || true
+  git -C "$orig_path" fetch -q origin "$qa_branch" 2>>"$rd/run.log" || true
+  if git -C "$orig_path" worktree add --force --detach "$wt" "origin/$qa_branch" 2>>"$rd/run.log" \
+     || git -C "$orig_path" worktree add --force --detach "$wt" "$qa_branch" 2>>"$rd/run.log"; then
+    path="$wt"; head="$(git_head "$path")"
+    if [ -n "$qa_install" ] && [ ! -d "$path/node_modules" ]; then
+      echo "installing deps in worktree (one-time, can take a few min): $qa_install"
+      ( cd "$path" && run_to "${INSTALL_TIMEOUT:-900}" bash -lc "$qa_install" ) >>"$rd/run.log" 2>&1 || echo "warn: install_cmd failed or timed out (boot may fail)"
+    fi
+  else
+    echo "# QA — $TARGET — could not create worktree for branch '$qa_branch'" > "$rd/report.md"
+    result error "worktree add failed for $qa_branch" 0 "" false "$head"; exit 0
+  fi
+fi
+# Drop the gitignored QA .env into the app dir (NEXT_PUBLIC_* must be present before boot). Worktree-local.
+if [ -n "$qa_env_file" ] && [ -f "$qa_env_file" ]; then cp "$qa_env_file" "$path/.env.local" && echo "wrote QA .env.local into app dir"; fi
+# Web3 QA: refuse to drive if the QA env's DB could reach real data (defense beyond the network stub layer).
+if [ "$web3_on" = 1 ] && [ -n "$qa_env_file" ] && [ -f "$qa_env_file" ]; then
+  _murl="$(grep -m1 '^MONGODB_URI=' "$qa_env_file" 2>/dev/null | cut -d= -f2-)"
+  case "$_murl" in
+    ""|*127.0.0.1*|*localhost*) : ;;
+    *) echo "REFUSING web3 QA: MONGODB_URI in QA env is not loopback"
+       { echo "# QA — $TARGET — unsafe MONGODB_URI"; echo; echo "web3 QA requires a loopback/empty MONGODB_URI in the QA env so the app's own API routes cannot reach a real database. Got a non-loopback host — refusing."; } > "$rd/report.md"
+       result error "unsafe MONGODB_URI for web3 QA" 0 "" false "$head"; exit 0 ;;
+  esac
+fi
 
 qadir="$rd/artifacts/qa"; mkdir -p "$qadir"
 applog="$rd/artifacts/app.log"
@@ -40,7 +95,7 @@ for _p in $all_ports; do
     result skipped "port $_p already in use" 0 "" true "$head"; exit 0
   fi
 done
-# Single-process apps (dress-finder) want PORT injected; multi-process stacks (karibukit web+api) must NOT
+# Single-process apps want PORT injected; multi-process stacks (web+api) must NOT
 # have one PORT forced on every child — set_port:false lets each process use its own configured port.
 set_port="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.set_port' "$TARGETS_JSON" 2>/dev/null)"
 # Plain background boot — keep the app attached. (A new session via setsid detaches the controlling TTY,
@@ -61,6 +116,8 @@ teardown(){
   [ -n "$path" ] && { pkill -f "$path" 2>/dev/null; pkill -f "$(basename "$path")" 2>/dev/null; }  # full path catches next/tsx; basename catches pnpm --filter @scope
   sleep 1
   for _p in $all_ports; do lsof -ti tcp:"$_p" 2>/dev/null | xargs kill -9 2>/dev/null || true; done
+  # Remove the throwaway worktree (after processes holding its files are reaped).
+  [ -n "$wt" ] && { git -C "$orig_path" worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt" 2>/dev/null; git -C "$orig_path" worktree prune 2>/dev/null; }
   true
 }
 trap teardown EXIT INT TERM
@@ -134,7 +191,8 @@ EOF
         [ "${FLOW_ATTEMPTS:-2}" -gt 1 ] && echo "    attempt $a/${FLOW_ATTEMPTS:-2}"
         QA_OUT="$fdir" QA_BASE="http://$host:$port" QA_GOAL="$fname" QA_API_BASE="$api_base" \
         QA_MODEL="$QA_MODEL" QA_MAX_TOOLCALLS="${FLOW_STEPS:-90}" QA_HEADLESS="$QA_HEADLESS" \
-        QA_LOGIN_EMAIL="$login_email" QA_LOGIN_PASSWORD="$login_pw" QA_LOGIN_PATH="$login_path" \
+        QA_LOGIN_EMAIL="$login_email" QA_LOGIN_PASSWORD="$login_pw" QA_LOGIN_PATH="$login_path" QA_START_PATH="$start_path" \
+        WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" \
         run_to "$CMD_TIMEOUT" pi -p -nbt --no-session -e "$ext" \
           --tools browser_snapshot,browser_click,browser_type,browser_upload,browser_navigate,browser_scroll,api_request,report_bug,finish \
           --provider "$QA_PROVIDER" --model "$QA_MODEL" --thinking "$QA_THINKING" --mode json \
@@ -166,7 +224,8 @@ Keep it under $steps snapshots. Don't repeat the same action — make progress t
 EOF
     QA_OUT="$qadir" QA_BASE="http://$host:$port" QA_SAMPLE="$sample" QA_GOAL="$goal" \
     QA_MODEL="$QA_MODEL" QA_MAX_TOOLCALLS="$((steps * 2))" QA_HEADLESS="$QA_HEADLESS" \
-    QA_LOGIN_EMAIL="$login_email" QA_LOGIN_PASSWORD="$login_pw" QA_LOGIN_PATH="$login_path" \
+    QA_LOGIN_EMAIL="$login_email" QA_LOGIN_PASSWORD="$login_pw" QA_LOGIN_PATH="$login_path" QA_START_PATH="$start_path" \
+    WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" \
     run_to "$CMD_TIMEOUT" pi -p -nbt --no-session -e "$ext" \
       --tools browser_snapshot,browser_click,browser_type,browser_upload,browser_navigate,browser_scroll,report_bug,finish \
       --provider "$QA_PROVIDER" --model "$QA_MODEL" --thinking "$QA_THINKING" --mode json \
