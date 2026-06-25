@@ -8,12 +8,18 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const BASE = process.env.XIAOMI_BASE_URL || 'https://api.xiaomimimo.com/v1';
-const MODEL = process.env.MIMO_VISION_MODEL || 'mimo-v2-omni';
+// Provider-agnostic: VISION_* are the generic knobs (Xiaomi/Mimo default, or OpenRouter, etc.);
+// XIAOMI_*/MIMO_* remain as back-compat aliases.
+const BASE = process.env.VISION_BASE_URL || process.env.XIAOMI_BASE_URL || 'https://api.xiaomimimo.com/v1';
+const MODEL = process.env.VISION_MODEL || process.env.MIMO_VISION_MODEL || 'mimo-v2-omni';
 const TIMEOUT = (parseInt(process.env.MIMO_VISION_TIMEOUT || '150', 10)) * 1000;
 const MAXTOK = parseInt(process.env.MIMO_VISION_MAXTOK || '2200', 10); // omni is a reasoning model — needs room
+const EXTRA_HEADERS = {}; // optional OpenRouter attribution headers (harmless elsewhere)
+if (process.env.VISION_HTTP_REFERER) EXTRA_HEADERS['HTTP-Referer'] = process.env.VISION_HTTP_REFERER;
+if (process.env.VISION_TITLE) EXTRA_HEADERS['X-Title'] = process.env.VISION_TITLE;
 
 function getKey() {
+  if (process.env.VISION_API_KEY) return process.env.VISION_API_KEY;
   if (process.env.XIAOMI_API_KEY) return process.env.XIAOMI_API_KEY;
   try { return JSON.parse(fs.readFileSync(path.join(os.homedir(), '.pi/agent/auth.json'), 'utf8')).xiaomi.key; }
   catch { return ''; }
@@ -26,7 +32,7 @@ function getKey() {
   if (!imgPath || !prompt) { console.error('usage: mimo-vision.js <image> "<prompt>"'); process.exit(2); }
   if (!fs.existsSync(imgPath)) { console.error('mimo-vision: image not found: ' + imgPath); process.exit(2); }
   const key = getKey();
-  if (!key) { console.error('mimo-vision: no XIAOMI key (set XIAOMI_API_KEY or ~/.pi/agent/auth.json)'); process.exit(3); }
+  if (!key) { console.error('mimo-vision: no vision API key (set VISION_API_KEY / XIAOMI_API_KEY or ~/.pi/agent/auth.json)'); process.exit(3); }
 
   const mime = imgPath.toLowerCase().endsWith('.jpg') || imgPath.toLowerCase().endsWith('.jpeg') ? 'image/jpeg' : 'image/png';
   const b64 = fs.readFileSync(imgPath).toString('base64');
@@ -43,7 +49,7 @@ function getKey() {
   try {
     resp = await fetch(`${BASE}/chat/completions`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json', ...EXTRA_HEADERS },
       body: JSON.stringify(body), signal: ctrl.signal,
     });
   } catch (e) { clearTimeout(timer); console.error('mimo-vision request failed:', e.message); process.exit(1); }

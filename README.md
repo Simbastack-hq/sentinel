@@ -167,6 +167,9 @@ Credentials referenced by `email_env`/`password_env` live only in `config/sentin
 ### Tuning the flow engine (env or `config/sentinel.env`)
 `FLOW_MAX` (flows per run, default 2) · `FLOW_ATTEMPTS` (attempts per flow, default 2) · `FLOW_STEPS` (hard tool-call cap per attempt, default 90) · `RUN_WALL_TIMEOUT` (per-run wall cap, default 3600s). A full 2×2 deep run is ~40 min / ~$2 of Mimo.
 
+### Models & providers (OpenRouter, etc.)
+Sentinel is provider-agnostic. The **QA decisions + flow derivation** run through `pi` — set `QA_PROVIDER`/`QA_MODEL` and configure that provider in `pi` itself (e.g. an `openrouter` provider in `~/.pi/agent/auth.json`). The **vision UI/UX pass** calls any OpenAI-compatible `/chat/completions` endpoint — set `VISION_BASE_URL`, `VISION_MODEL`, `VISION_API_KEY` (e.g. point them at `https://openrouter.ai/api/v1`). All default to Xiaomi/Mimo if unset; the old `XIAOMI_*`/`MIMO_VISION_MODEL` names still work as aliases.
+
 ### Configuring brain-sync (env or `config/sentinel.env`)
 The brain location is **global** (one brain for all targets): `BRAIN_PATH` (local clone — leave blank to disable), `BRAIN_GITHUB` (default `Simbastack-hq/simbastack-brain`), `BRAIN_BASE` (default `main`), `ENABLE_BRAIN_PR` (`0` dry-run patch / `1` open PR), `MAX_BRAIN_DIFF_CHARS` (default 80000 — above this it sends a stat+commit-log summary), `BRAIN_MIN_DIFF_LINES` (default 8 — trivial windows below this open no PR). Per target you only set `brain-sync: { enabled, cadence }` in `targets.json` (use `every:24h`, never `on-commit`). Full walkthrough: [`examples/brain-scaffold/SETUP.md`](examples/brain-scaffold/SETUP.md).
 
