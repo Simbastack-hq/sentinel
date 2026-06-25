@@ -41,6 +41,11 @@ if [ "$remote_mode" = 1 ]; then
        fi ;;
   esac
 fi
+# Backend-auth capture (optional): how api_request grabs the app's own bearer. capture_url_re = a regex matched
+# against request URLs to sniff the Authorization header (default /api/); storage_key = a localStorage key
+# (substring) holding a bearer token as a fallback. Lets non-Supabase / non-/api/ apps be asserted too.
+auth_capture_url_re="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.auth.capture_url_re // ""' "$TARGETS_JSON" 2>/dev/null)"
+auth_storage_key="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.auth.storage_key // ""' "$TARGETS_JSON" 2>/dev/null)"
 aux_ports="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.aux_ports[]? // empty' "$TARGETS_JSON" 2>/dev/null | tr '\n' ' ')"
 all_ports="$port $aux_ports"
 # Login (optional): targets.json references env-var NAMES; the secrets live only in config/sentinel.env and are
@@ -225,6 +230,7 @@ EOF
         QA_OUT="$fdir" QA_BASE="$qa_base" QA_GOAL="$fname" QA_API_BASE="$api_base" \
         QA_MODEL="$QA_MODEL" QA_MAX_TOOLCALLS="${FLOW_STEPS:-90}" QA_HEADLESS="$QA_HEADLESS" \
         QA_LOGIN_EMAIL="$login_email" QA_LOGIN_PASSWORD="$login_pw" QA_LOGIN_PATH="$login_path" QA_START_PATH="$start_path" \
+        QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" \
         WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" \
         run_to "$CMD_TIMEOUT" pi -p -nbt --no-session -e "$ext" \
           --tools browser_snapshot,browser_click,browser_type,browser_upload,browser_navigate,browser_scroll,api_request,report_bug,finish \
@@ -258,6 +264,7 @@ EOF
     QA_OUT="$qadir" QA_BASE="$qa_base" QA_SAMPLE="$sample" QA_GOAL="$goal" \
     QA_MODEL="$QA_MODEL" QA_MAX_TOOLCALLS="$((steps * 2))" QA_HEADLESS="$QA_HEADLESS" \
     QA_LOGIN_EMAIL="$login_email" QA_LOGIN_PASSWORD="$login_pw" QA_LOGIN_PATH="$login_path" QA_START_PATH="$start_path" \
+    QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" \
     WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" \
     run_to "$CMD_TIMEOUT" pi -p -nbt --no-session -e "$ext" \
       --tools browser_snapshot,browser_click,browser_type,browser_upload,browser_navigate,browser_scroll,report_bug,finish \

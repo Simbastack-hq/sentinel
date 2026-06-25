@@ -139,6 +139,7 @@ See [`config/targets.json.example`](config/targets.json.example). Key `qa.app` f
 | `aux_ports` | extra services to wait for + reap (e.g. the API on `4000`) |
 | `host` | browser origin — `localhost` vs `127.0.0.1` (matters for CORS/sessions) |
 | `api_base` | backend base URL for the flow engine's `api_request` assertions |
+| `auth` | `{capture_url_re, storage_key}` — how `api_request` gets the app's own bearer (default: sniff the `Authorization` header on `/api/` requests, else a Supabase `localStorage` token). Set `capture_url_re` (a regex, e.g. `"mybackend\\.com\|/v1/"`) or `storage_key` for non-Supabase apps |
 | `login` | `{path, email_env, password_env}` — Playwright fills the form from env vars (never sent to the model or logged) |
 | `goal` | (pi-native/node-loop only) what to exercise |
 | `branch` + `worktree:true` | QA a *different* branch in a throwaway `git worktree` (real working tree untouched); `install_cmd` + `qa_env` (a gitignored `.env` dropped in as `.env.local`) |
