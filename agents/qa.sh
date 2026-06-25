@@ -71,9 +71,16 @@ web3_enabled="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.enabled
 web3_rpc="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.rpc // ""' "$TARGETS_JSON" 2>/dev/null)"
 web3_chain="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.chain_id // 42161' "$TARGETS_JSON" 2>/dev/null)"
 web3_stubs="$(jq -c --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.stubs // []' "$TARGETS_JSON" 2>/dev/null)"
-web3_on=""; web3_wl_key=""
+# Optional: supply a SPECIFIC key via an env-var NAME (value lives in config/sentinel.env, never in targets.json),
+# and opt in to a FUNDED key. Only for a small capped canary — broadcasts stay blocked. Default = fresh unfunded burner.
+web3_pk_env="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.private_key_env // empty' "$TARGETS_JSON" 2>/dev/null)"
+web3_allow_funded="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.allow_funded // false' "$TARGETS_JSON" 2>/dev/null)"
+web3_on=""; web3_wl_key=""; web3_pk=""; web3_allow_funded_flag=""
 if [ "$web3_enabled" = true ]; then
   web3_on=1
+  # Resolve the key by env-var NAME (like login creds) — kept out of targets.json and never logged.
+  [ -n "$web3_pk_env" ] && web3_pk="${!web3_pk_env:-}"
+  [ "$web3_allow_funded" = true ] && web3_allow_funded_flag=1
   # The whitelist-stub passphrase MUST equal the app's NEXT_PUBLIC_CRYPTO_KEY — read it from the same QA .env
   # so there is a single source of truth (no chance of drift between the stub and the app).
   [ -n "$qa_env_file" ] && [ -f "$qa_env_file" ] && web3_wl_key="$(grep -m1 '^NEXT_PUBLIC_CRYPTO_KEY=' "$qa_env_file" 2>/dev/null | cut -d= -f2-)"
@@ -231,7 +238,7 @@ EOF
         QA_MODEL="$QA_MODEL" QA_MAX_TOOLCALLS="${FLOW_STEPS:-90}" QA_HEADLESS="$QA_HEADLESS" \
         QA_LOGIN_EMAIL="$login_email" QA_LOGIN_PASSWORD="$login_pw" QA_LOGIN_PATH="$login_path" QA_START_PATH="$start_path" \
         QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" \
-        WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" \
+        WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" WEB3_PK="$web3_pk" WEB3_ALLOW_FUNDED="$web3_allow_funded_flag" \
         run_to "$CMD_TIMEOUT" pi -p -nbt --no-session -e "$ext" \
           --tools browser_snapshot,browser_click,browser_type,browser_upload,browser_navigate,browser_scroll,api_request,report_bug,finish \
           --provider "$QA_PROVIDER" --model "$QA_MODEL" --thinking "$QA_THINKING" --mode json \
@@ -265,7 +272,7 @@ EOF
     QA_MODEL="$QA_MODEL" QA_MAX_TOOLCALLS="$((steps * 2))" QA_HEADLESS="$QA_HEADLESS" \
     QA_LOGIN_EMAIL="$login_email" QA_LOGIN_PASSWORD="$login_pw" QA_LOGIN_PATH="$login_path" QA_START_PATH="$start_path" \
     QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" \
-    WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" \
+    WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" WEB3_PK="$web3_pk" WEB3_ALLOW_FUNDED="$web3_allow_funded_flag" \
     run_to "$CMD_TIMEOUT" pi -p -nbt --no-session -e "$ext" \
       --tools browser_snapshot,browser_click,browser_type,browser_upload,browser_navigate,browser_scroll,report_bug,finish \
       --provider "$QA_PROVIDER" --model "$QA_MODEL" --thinking "$QA_THINKING" --mode json \
