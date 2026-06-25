@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # sentinel — 24/7 specialized agents (code review, docs-sync, agentic QA).
-# Heartbeat: `sentinel tick` (run by launchd). See docs/DESIGN.md.
+# Heartbeat: `sentinel tick` (run by launchd on macOS, or systemd/cron on Linux). See docs/DESIGN.md.
 set -uo pipefail
 SENTINEL_HOME="${SENTINEL_HOME:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 export SENTINEL_HOME
+SENTINEL_OS="${SENTINEL_OS:-$(uname -s)}"   # Darwin (launchd) | Linux (systemd --user, cron fallback); override to force
 # shellcheck source=../lib/common.sh
 . "$SENTINEL_HOME/lib/common.sh"
 
@@ -151,39 +152,116 @@ cmd_add_target(){ # add-target <key> <local-path> [base]
   echo; echo "review is on by default. Enable docs-sync / brain-sync, or add a qa app block, by editing config/targets.json. (brain-sync also needs BRAIN_PATH in config/sentinel.env.)"
 }
 
-cmd_install(){ # write + load the launchd scheduler
+# Render a scheduler template, substituting __SENTINEL_HOME__/__INTERVAL__/__PATH__.
+# Literal replace (robust to '#','&','/' in PATH/HOME that would break sed).
+render_tmpl(){
+  S_HOME="$SENTINEL_HOME" S_INT="$SCHEDULER_INTERVAL" S_PATH="$PATH" \
+  python3 - "$1" "$2" <<'PY'
+import os, sys
+t = open(sys.argv[1]).read()
+for token, var in (('__SENTINEL_HOME__','S_HOME'), ('__INTERVAL__','S_INT'), ('__PATH__','S_PATH')):
+    t = t.replace(token, os.environ[var])
+open(sys.argv[2], 'w').write(t)
+PY
+}
+
+# --- macOS: launchd ---
+install_launchd(){
   local plist="$HOME/Library/LaunchAgents/com.sentinel.scheduler.plist"
   mkdir -p "$HOME/Library/LaunchAgents"
-  # Literal substitution (robust to '#', '&', '/' in PATH/HOME — sed is not).
-  S_HOME="$SENTINEL_HOME" S_INT="$SCHEDULER_INTERVAL" S_PATH="$PATH" \
-  python3 - "$SENTINEL_HOME/launchd/com.sentinel.scheduler.plist" "$plist" <<'PY'
-import os, sys
-src, dst = sys.argv[1], sys.argv[2]
-t = open(src).read()
-t = t.replace('__SENTINEL_HOME__', os.environ['S_HOME']).replace('__INTERVAL__', os.environ['S_INT']).replace('__PATH__', os.environ['S_PATH'])
-open(dst, 'w').write(t)
-PY
+  render_tmpl "$SENTINEL_HOME/launchd/com.sentinel.scheduler.plist" "$plist"
   launchctl unload "$plist" 2>/dev/null || true
   launchctl load "$plist" && echo "loaded scheduler: ticks every ${SCHEDULER_INTERVAL}s → $VAR/scheduler.log" || die "launchctl load failed"
 }
-cmd_uninstall(){
+uninstall_launchd(){
   local plist="$HOME/Library/LaunchAgents/com.sentinel.scheduler.plist"
   launchctl unload "$plist" 2>/dev/null && echo "scheduler unloaded" || echo "scheduler was not loaded"
 }
 
+# --- Linux: systemd --user timer (preferred) ---
+install_systemd(){
+  local d="$HOME/.config/systemd/user"; mkdir -p "$d"
+  render_tmpl "$SENTINEL_HOME/systemd/sentinel.service" "$d/sentinel.service"
+  render_tmpl "$SENTINEL_HOME/systemd/sentinel.timer"   "$d/sentinel.timer"
+  systemctl --user daemon-reload
+  systemctl --user enable --now sentinel.timer || die "systemctl --user enable failed (no user systemd session? cron is the fallback)"
+  if loginctl enable-linger "$USER" 2>/dev/null; then echo "linger enabled (timer runs while you're logged out)"
+  else echo "note: run 'sudo loginctl enable-linger $USER' so the timer runs when you're logged out"; fi
+  echo "loaded systemd timer: ticks every ${SCHEDULER_INTERVAL}s → $VAR/scheduler.log  (status: systemctl --user status sentinel.timer)"
+}
+uninstall_systemd(){
+  systemctl --user disable --now sentinel.timer 2>/dev/null && echo "systemd timer disabled" || echo "systemd timer was not loaded"
+  rm -f "$HOME/.config/systemd/user/sentinel.timer" "$HOME/.config/systemd/user/sentinel.service"
+  systemctl --user daemon-reload 2>/dev/null || true
+}
+
+# --- Linux: cron (fallback when no user systemd session, e.g. minimal containers) ---
+install_cron(){
+  local mins=$(( (SCHEDULER_INTERVAL + 59) / 60 )); [ "$mins" -lt 1 ] && mins=1
+  local line="*/$mins * * * * SENTINEL_HOME='$SENTINEL_HOME' PATH='$PATH' /bin/bash -c 'exec \"$SENTINEL_HOME/bin/sentinel\" tick' >> '$SENTINEL_HOME/var/scheduler.log' 2>&1 # com.sentinel.scheduler"
+  ( crontab -l 2>/dev/null | grep -v 'com.sentinel.scheduler'; echo "$line" ) | crontab - \
+    && echo "installed cron entry: ticks every ${mins}m (crontab -l). NOTE: cron granularity is whole minutes." \
+    || die "crontab install failed"
+}
+uninstall_cron(){
+  crontab -l 2>/dev/null | grep -v 'com.sentinel.scheduler' | crontab - && echo "cron entry removed"
+}
+
+install_linux(){
+  if have systemctl && systemctl --user show-environment >/dev/null 2>&1; then install_systemd
+  elif have crontab; then echo "no user systemd session — falling back to cron"; install_cron
+  else die "no scheduler backend: need systemd (with a user session) or cron"; fi
+}
+uninstall_linux(){
+  local did=0
+  if have systemctl && [ -f "$HOME/.config/systemd/user/sentinel.timer" ]; then uninstall_systemd; did=1; fi
+  if have crontab && crontab -l 2>/dev/null | grep -q 'com.sentinel.scheduler'; then uninstall_cron; did=1; fi
+  [ "$did" = 1 ] || echo "scheduler was not loaded"
+}
+
+cmd_install(){
+  case "$SENTINEL_OS" in
+    Darwin) install_launchd;;
+    Linux)  install_linux;;
+    *) die "unsupported OS '$SENTINEL_OS' (need Darwin or Linux)";;
+  esac
+}
+cmd_uninstall(){
+  case "$SENTINEL_OS" in
+    Darwin) uninstall_launchd;;
+    Linux)  uninstall_linux;;
+    *) die "unsupported OS '$SENTINEL_OS'";;
+  esac
+}
+
 cmd_doctor(){
   echo "== sentinel doctor =="
+  echo "OS:            $SENTINEL_OS"
   echo "SENTINEL_HOME: $SENTINEL_HOME"
-  local x; for x in jq git gh node claude codex pi curl lsof gtimeout caffeinate; do
+  local deps="jq git gh node claude codex pi curl lsof"
+  case "$SENTINEL_OS" in
+    Darwin) deps="$deps gtimeout caffeinate";;
+    Linux)  deps="$deps timeout";;
+  esac
+  local x; for x in $deps; do
     if have "$x"; then printf "  [ok]  %s\n" "$x"; else printf "  [--]  %s (missing)\n" "$x"; fi
   done
   local pw; pw="$(NODE_PATH="$SENTINEL_HOME/node_modules" node -e "require.resolve('playwright');console.log(require('playwright/package.json').version)" 2>/dev/null)"
   echo "  playwright: ${pw:-NOT resolvable (cd ~/sentinel && npm install)}"
   echo "targets.json: $(jq -e . "$TARGETS_JSON" >/dev/null 2>&1 && echo valid || echo INVALID)"
   echo "ntfy topic:   $([ -n "$NTFY_TOPIC" ] && echo "set (${#NTFY_TOPIC} chars)" || echo "UNSET")"
-  echo "timeout bin:  ${TIMEOUT_BIN:-NONE (brew install coreutils)}"
+  local thint; case "$SENTINEL_OS" in Darwin) thint="brew install coreutils";; *) thint="apt install coreutils";; esac
+  echo "timeout bin:  ${TIMEOUT_BIN:-NONE ($thint)}"
   echo "pi default:   provider=$QA_PROVIDER model=$QA_MODEL"
-  echo "scheduler:    $(launchctl list 2>/dev/null | grep -q com.sentinel.scheduler && echo "loaded" || echo "not loaded (sentinel install)")"
+  local sched
+  case "$SENTINEL_OS" in
+    Darwin) sched="$(launchctl list 2>/dev/null | grep -q com.sentinel.scheduler && echo "loaded" || echo "not loaded (sentinel install)")";;
+    Linux)  if have systemctl && systemctl --user is-active --quiet sentinel.timer 2>/dev/null; then sched="systemd timer active"
+            elif have crontab && crontab -l 2>/dev/null | grep -q com.sentinel.scheduler; then sched="cron entry present"
+            else sched="not loaded (sentinel install)"; fi;;
+    *) sched="unknown OS";;
+  esac
+  echo "scheduler:    $sched"
   if have gh; then echo "gh auth:      $(gh auth status >/dev/null 2>&1 && echo ok || echo "not logged in (PR/comment modes need it)")"; fi
   echo "brain repo:   $([ -n "${BRAIN_PATH:-}" ] && [ -d "${BRAIN_PATH:-}/.git" ] && echo "ok ($BRAIN_PATH → ${BRAIN_GITHUB:-no-remote}, PR=$ENABLE_BRAIN_PR)" || echo "UNSET/not-a-repo (brain-sync will skip)")"
 }
@@ -197,7 +275,7 @@ sentinel — 24/7 specialized agents
   sentinel report [t] [agent]   show latest report(s)
   sentinel targets              registry + what's due
   sentinel add-target <k> <path> [base]
-  sentinel install | uninstall  load/unload the launchd scheduler
+  sentinel install | uninstall  load/unload the scheduler (launchd on macOS, systemd/cron on Linux)
   sentinel doctor               environment + dependency check
 EOF
 }
