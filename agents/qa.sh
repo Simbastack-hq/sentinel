@@ -29,8 +29,11 @@ if [ "$remote_mode" = 1 ]; then qa_base="${remote_base%/}"; : "${api_base:=$qa_b
 # Require an explicit opt-in so a stray base_url can't silently hammer staging/prod.
 if [ "$remote_mode" = 1 ]; then
   allow_live="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.allow_live_data // false' "$TARGETS_JSON" 2>/dev/null)"
-  case "$qa_base" in
-    *://localhost*|*://127.0.0.1*|*://"[::1]"*) : ;;   # local deploy — safe
+  # Parse the EXACT host (no glob — 'localhost.evil.com' must NOT count as local).
+  _hostport="${qa_base#*://}"; _hostport="${_hostport%%/*}"
+  case "$_hostport" in "["*) _qhost="${_hostport%%]*}"; _qhost="${_qhost#[}";; *) _qhost="${_hostport%%:*}";; esac
+  case "$_qhost" in
+    localhost|127.0.0.1|::1) : ;;   # genuinely local — safe
     *) if [ "$allow_live" != true ]; then
          echo "REFUSING remote QA against a live origin ($qa_base) without allow_live_data"
          { echo "# QA — $TARGET — refused (live data)"; echo; echo "\`base_url\` = \`$qa_base\` is a non-local origin, so QA could act on live data there. Set \`qa.app.allow_live_data: true\` to proceed (and scope the goal/flows to read-only or non-destructive actions)."; } > "$rd/report.md"
