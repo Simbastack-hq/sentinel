@@ -99,7 +99,7 @@ render-report.js  →  one combined report.html (flows, FE+BE bugs, UI/UX, links
 ## 5. Login & UI/UX vision
 
 - **Login** (optional, `qa.app.login`): before exploration the extension navigates to the login path, fills email/password from env vars (Playwright `fill` + a hydration-safe retype, since React controlled inputs can drop a too-early fill), and submits. Credentials come from `config/sentinel.env` by env-var name — **never** placed in the model prompt, trace, or logs. A same-origin nav guard keeps the agent from wandering off and losing its session.
-- **UI/UX review:** `mimo-v2.5-pro` is text-only, so vision uses **`mimo-v2-omni`** via the Xiaomi API directly (pi only registers the text Mimo models). `uiux-review.js` sends each key screen with a structured rubric (hierarchy, spacing, contrast/WCAG, typography, consistency, usability/Nielsen, states, density) and parses JSON findings. (omni is a reasoning model — it needs generous `max_tokens` or it cuts off before emitting JSON.)
+- **UI/UX review:** `mimo-v2.5-pro` is text-only, so vision uses **`mimo-v2-omni`** via the Xiaomi API directly (a one-shot rubric call with an inline screenshot — no agent loop, so no need to go through pi). `uiux-review.js` sends each key screen with a structured rubric (hierarchy, spacing, contrast/WCAG, typography, consistency, usability/Nielsen, states, density) and parses JSON findings. (omni is a reasoning model — it needs generous `max_tokens` or it cuts off before emitting JSON.)
 
 ## 5c. web3 / wallet-dApp QA (unfunded burner)
 
