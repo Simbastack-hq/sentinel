@@ -7,13 +7,24 @@
  */
 const fs = require('fs'); const os = require('os'); const path = require('path');
 
-const BASE = process.env.XIAOMI_BASE_URL || 'https://api.xiaomimimo.com/v1';
-const MODEL = process.env.MIMO_VISION_MODEL || 'mimo-v2-omni';
+// Provider-agnostic: any OpenAI-compatible vision endpoint (Xiaomi/Mimo by default, or OpenRouter, etc.).
+// VISION_* are the generic knobs; XIAOMI_*/MIMO_* are kept as back-compat aliases.
+const DEFAULT_BASE = 'https://api.xiaomimimo.com/v1';
+const BASE = process.env.VISION_BASE_URL || process.env.XIAOMI_BASE_URL || DEFAULT_BASE;
+const IS_DEFAULT_BASE = BASE === DEFAULT_BASE;
+// On a non-default base there's no safe implicit model — require VISION_MODEL (validated below).
+const MODEL = process.env.VISION_MODEL || process.env.MIMO_VISION_MODEL || (IS_DEFAULT_BASE ? 'mimo-v2-omni' : '');
 const MAXTOK = parseInt(process.env.MIMO_VISION_MAXTOK || '6000', 10); // omni reasons HEAVILY before emitting JSON — needs lots of room or it cuts off mid-thought
 const TIMEOUT = (parseInt(process.env.MIMO_VISION_TIMEOUT || '150', 10)) * 1000;
 const CONCURRENCY = parseInt(process.env.UIUX_CONCURRENCY || '3', 10);
+// Optional attribution headers (OpenRouter uses these for ranking; harmless elsewhere).
+const EXTRA_HEADERS = {};
+if (process.env.VISION_HTTP_REFERER) EXTRA_HEADERS['HTTP-Referer'] = process.env.VISION_HTTP_REFERER;
+if (process.env.VISION_TITLE) EXTRA_HEADERS['X-Title'] = process.env.VISION_TITLE;
 
 function getKey() {
+  if (process.env.VISION_API_KEY) return process.env.VISION_API_KEY;
+  if (!IS_DEFAULT_BASE) return ''; // never send Xiaomi creds to a non-Xiaomi endpoint — require VISION_API_KEY there
   if (process.env.XIAOMI_API_KEY) return process.env.XIAOMI_API_KEY;
   try { return JSON.parse(fs.readFileSync(path.join(os.homedir(), '.pi/agent/auth.json'), 'utf8')).xiaomi.key; } catch { return ''; }
 }
@@ -53,7 +64,7 @@ async function reviewScreen(app, screen, imgPath) {
   let tokens = 0, parsed = { summary: '', findings: [] };
   try {
     const r = await fetch(`${BASE}/chat/completions`, { method: 'POST',
-      headers: { Authorization: `Bearer ${getKey()}`, 'Content-Type': 'application/json' },
+      headers: { Authorization: `Bearer ${getKey()}`, 'Content-Type': 'application/json', ...EXTRA_HEADERS },
       body: JSON.stringify(body), signal: ctrl.signal });
     const d = await r.json();
     tokens = (d.usage && d.usage.total_tokens) || 0;
@@ -76,7 +87,9 @@ async function pool(items, n, fn) {
 (async () => {
   const o = parseArgs();
   if (!o.report || !o.out) { console.error('usage: uiux-review --report <report.json> --out <dir>'); process.exit(2); }
-  if (!getKey()) { console.error('uiux-review: no XIAOMI key'); process.exit(3); }
+  if (!!process.env.VISION_API_KEY !== !!process.env.VISION_BASE_URL) { console.error('uiux-review: set VISION_API_KEY and VISION_BASE_URL together (they pair as one provider)'); process.exit(3); }
+  if (!getKey()) { console.error('uiux-review: no vision API key (set VISION_API_KEY for a custom VISION_BASE_URL, else XIAOMI_API_KEY or ~/.pi/agent/auth.json)'); process.exit(3); }
+  if (!MODEL) { console.error('uiux-review: set VISION_MODEL when using a non-default VISION_BASE_URL'); process.exit(3); }
   let rep; try { rep = JSON.parse(fs.readFileSync(o.report, 'utf8')); } catch { console.error('uiux-review: bad report.json'); process.exit(2); }
   // Distinct screens by URL path; representative shot = the LAST snapshot of that screen.
   const byScreen = new Map();

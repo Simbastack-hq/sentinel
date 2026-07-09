@@ -11,12 +11,41 @@ if [ "$AI_ALLOWED" != "true" ]; then echo "# qa skipped — ai_allowed is false"
 
 start_cmd="$(t_app "$TARGET" start_cmd)"; port="$(t_app "$TARGET" port)"; health="$(t_app "$TARGET" health_path)"
 steps="$(t_app "$TARGET" max_steps)"; goal="$(t_app "$TARGET" goal)"; sample_rel="$(t_app "$TARGET" sample_image)"
-[ -n "$start_cmd" ] && [ -n "$port" ] || { echo "# qa skipped — no app config (start_cmd/port) for $TARGET" > "$rd/report.md"; result skipped "no app config" 0 "" true "$head"; exit 0; }
+# Remote mode: point QA at a LIVE/already-deployed URL instead of booting the app locally. recon still runs
+# on the local repo to derive flows; we just drive the remote origin (and assert its api_base). No boot/teardown.
+remote_base="$(t_app "$TARGET" base_url)"
+remote_mode=0; [ -n "$remote_base" ] && remote_mode=1
+if [ "$remote_mode" != 1 ]; then
+  [ -n "$start_cmd" ] && [ -n "$port" ] || { echo "# qa skipped — no app config (need start_cmd+port, or base_url for a live app) for $TARGET" > "$rd/report.md"; result skipped "no app config" 0 "" true "$head"; exit 0; }
+fi
 : "${health:=/}"; : "${steps:=10}"
 sample=""; [ -n "$sample_rel" ] && { case "$sample_rel" in /*) sample="$sample_rel";; *) sample="$SENTINEL_HOME/$sample_rel";; esac; }
 boot_timeout="$(t_app "$TARGET" boot_timeout)"; : "${boot_timeout:=60}"
 host="$(t_app "$TARGET" host)"; : "${host:=127.0.0.1}"   # browser origin (some apps gate CORS/sessions on 'localhost' vs '127.0.0.1')
 api_base="$(t_app "$TARGET" api_base)"                    # backend API base for flow-engine assertions (e.g. http://localhost:4000)
+# Single source for the browser origin: the remote URL, or the locally-booted web port.
+if [ "$remote_mode" = 1 ]; then qa_base="${remote_base%/}"; : "${api_base:=$qa_base}"; else qa_base="http://$host:$port"; fi
+# Fail CLOSED: driving a non-local origin can act on live data (UI actions + authenticated api_request).
+# Require an explicit opt-in so a stray base_url can't silently hammer staging/prod.
+if [ "$remote_mode" = 1 ]; then
+  allow_live="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.allow_live_data // false' "$TARGETS_JSON" 2>/dev/null)"
+  # Parse the EXACT host (no glob — 'localhost.evil.com' must NOT count as local).
+  _hostport="${qa_base#*://}"; _hostport="${_hostport%%/*}"
+  case "$_hostport" in "["*) _qhost="${_hostport%%]*}"; _qhost="${_qhost#[}";; *) _qhost="${_hostport%%:*}";; esac
+  case "$_qhost" in
+    localhost|127.0.0.1|::1) : ;;   # genuinely local — safe
+    *) if [ "$allow_live" != true ]; then
+         echo "REFUSING remote QA against a live origin ($qa_base) without allow_live_data"
+         { echo "# QA — $TARGET — refused (live data)"; echo; echo "\`base_url\` = \`$qa_base\` is a non-local origin, so QA could act on live data there. Set \`qa.app.allow_live_data: true\` to proceed (and scope the goal/flows to read-only or non-destructive actions)."; } > "$rd/report.md"
+         result skipped "remote live-data not allowed (set allow_live_data:true)" 0 "" true "$head"; exit 0
+       fi ;;
+  esac
+fi
+# Backend-auth capture (optional): how api_request grabs the app's own bearer. capture_url_re = a regex matched
+# against request URLs to sniff the Authorization header (default /api/); storage_key = a localStorage key
+# (substring) holding a bearer token as a fallback. Lets non-Supabase / non-/api/ apps be asserted too.
+auth_capture_url_re="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.auth.capture_url_re // ""' "$TARGETS_JSON" 2>/dev/null)"
+auth_storage_key="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.auth.storage_key // ""' "$TARGETS_JSON" 2>/dev/null)"
 aux_ports="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.aux_ports[]? // empty' "$TARGETS_JSON" 2>/dev/null | tr '\n' ' ')"
 all_ports="$port $aux_ports"
 # Login (optional): targets.json references env-var NAMES; the secrets live only in config/sentinel.env and are
@@ -42,19 +71,26 @@ web3_enabled="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.enabled
 web3_rpc="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.rpc // ""' "$TARGETS_JSON" 2>/dev/null)"
 web3_chain="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.chain_id // 42161' "$TARGETS_JSON" 2>/dev/null)"
 web3_stubs="$(jq -c --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.stubs // []' "$TARGETS_JSON" 2>/dev/null)"
-web3_on=""; web3_wl_key=""
+# Optional: supply a SPECIFIC key via an env-var NAME (value lives in config/sentinel.env, never in targets.json),
+# and opt in to a FUNDED key. Only for a small capped canary — broadcasts stay blocked. Default = fresh unfunded burner.
+web3_pk_env="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.private_key_env // empty' "$TARGETS_JSON" 2>/dev/null)"
+web3_allow_funded="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.allow_funded // false' "$TARGETS_JSON" 2>/dev/null)"
+web3_on=""; web3_wl_key=""; web3_pk=""; web3_allow_funded_flag=""
 if [ "$web3_enabled" = true ]; then
   web3_on=1
+  # Resolve the key by env-var NAME (like login creds) — kept out of targets.json and never logged.
+  [ -n "$web3_pk_env" ] && web3_pk="${!web3_pk_env:-}"
+  [ "$web3_allow_funded" = true ] && web3_allow_funded_flag=1
   # The whitelist-stub passphrase MUST equal the app's NEXT_PUBLIC_CRYPTO_KEY — read it from the same QA .env
   # so there is a single source of truth (no chance of drift between the stub and the app).
   [ -n "$qa_env_file" ] && [ -f "$qa_env_file" ] && web3_wl_key="$(grep -m1 '^NEXT_PUBLIC_CRYPTO_KEY=' "$qa_env_file" 2>/dev/null | cut -d= -f2-)"
 fi
 
-if [ "$DRY_RUN" = 1 ]; then echo "[dry] would boot '$start_cmd' on 127.0.0.1:$port then drive $steps steps with $QA_MODEL"; echo "# qa dry-run" > "$rd/report.md"; result skipped "dry-run" 0 "" true "$head"; exit 0; fi
+if [ "$DRY_RUN" = 1 ]; then echo "[dry] would $([ "$remote_mode" = 1 ] && echo "drive remote $qa_base" || echo "boot '$start_cmd' on 127.0.0.1:$port") for $steps steps with $QA_MODEL"; echo "# qa dry-run" > "$rd/report.md"; result skipped "dry-run" 0 "" true "$head"; exit 0; fi
 
 # Optional: boot a DIFFERENT branch in a throwaway worktree (never touches the real working tree).
 orig_path="$path"; wt=""
-if [ "$qa_worktree" = true ] && [ -n "$qa_branch" ]; then
+if [ "$remote_mode" != 1 ] && [ "$qa_worktree" = true ] && [ -n "$qa_branch" ]; then
   wt="$VAR/worktrees/$TARGET"
   echo "preparing worktree for branch '$qa_branch' (real working tree untouched)..."
   git -C "$orig_path" worktree remove --force "$wt" 2>/dev/null || true; rm -rf "$wt" 2>/dev/null
@@ -72,20 +108,28 @@ if [ "$qa_worktree" = true ] && [ -n "$qa_branch" ]; then
     result error "worktree add failed for $qa_branch" 0 "" false "$head"; exit 0
   fi
 fi
-# Drop the gitignored QA .env into the app dir (NEXT_PUBLIC_* must be present before boot). Worktree-local.
-if [ -n "$qa_env_file" ] && [ -f "$qa_env_file" ]; then cp "$qa_env_file" "$path/.env.local" && echo "wrote QA .env.local into app dir"; fi
-# Web3 QA: refuse to drive if the QA env's DB could reach real data (defense beyond the network stub layer).
-if [ "$web3_on" = 1 ] && [ -n "$qa_env_file" ] && [ -f "$qa_env_file" ]; then
-  _murl="$(grep -m1 '^MONGODB_URI=' "$qa_env_file" 2>/dev/null | cut -d= -f2-)"
-  case "$_murl" in
-    ""|*127.0.0.1*|*localhost*) : ;;
-    *) echo "REFUSING web3 QA: MONGODB_URI in QA env is not loopback"
-       { echo "# QA — $TARGET — unsafe MONGODB_URI"; echo; echo "web3 QA requires a loopback/empty MONGODB_URI in the QA env so the app's own API routes cannot reach a real database. Got a non-loopback host — refusing."; } > "$rd/report.md"
-       result error "unsafe MONGODB_URI for web3 QA" 0 "" false "$head"; exit 0 ;;
-  esac
+# Local-boot prep only (remote mode runs against an already-deployed app — nothing to drop or DB-guard here).
+if [ "$remote_mode" != 1 ]; then
+  # Drop the gitignored QA .env into the app dir (NEXT_PUBLIC_* must be present before boot). Worktree-local.
+  if [ -n "$qa_env_file" ] && [ -f "$qa_env_file" ]; then cp "$qa_env_file" "$path/.env.local" && echo "wrote QA .env.local into app dir"; fi
+  # Web3 QA: refuse to drive if the QA env's DB could reach real data (defense beyond the network stub layer).
+  if [ "$web3_on" = 1 ] && [ -n "$qa_env_file" ] && [ -f "$qa_env_file" ]; then
+    _murl="$(grep -m1 '^MONGODB_URI=' "$qa_env_file" 2>/dev/null | cut -d= -f2-)"
+    case "$_murl" in
+      ""|*127.0.0.1*|*localhost*) : ;;
+      *) echo "REFUSING web3 QA: MONGODB_URI in QA env is not loopback"
+         { echo "# QA — $TARGET — unsafe MONGODB_URI"; echo; echo "web3 QA requires a loopback/empty MONGODB_URI in the QA env so the app's own API routes cannot reach a real database. Got a non-loopback host — refusing."; } > "$rd/report.md"
+         result error "unsafe MONGODB_URI for web3 QA" 0 "" false "$head"; exit 0 ;;
+    esac
+  fi
 fi
 
 qadir="$rd/artifacts/qa"; mkdir -p "$qadir"
+if [ "$remote_mode" = 1 ]; then
+  # No local process to start/teardown — just confirm the live app answers, then drive it.
+  echo "remote mode: QA against $qa_base (no local boot)"
+  curl -fsS --max-time 15 "$qa_base$health" >/dev/null 2>&1 || echo "WARN: $qa_base$health not reachable — proceeding anyway"
+else
 applog="$rd/artifacts/app.log"
 # Refuse to boot over (or later kill) a process we didn't start — check EVERY port we'll use.
 for _p in $all_ports; do
@@ -133,9 +177,10 @@ for _p in $aux_ports; do
   aok=0; for i in $(seq 1 "$boot_timeout"); do lsof -ti tcp:"$_p" >/dev/null 2>&1 && { aok=1; break; }; kill -0 "$app_pid" 2>/dev/null || break; sleep 1; done
   [ "$aok" = 1 ] && echo "aux port $_p up" || echo "WARN: aux port $_p never came up — QA may see backend-down"
 done
+fi   # end local-boot block
 # Engine: node-loop (v1, deterministic; default) or pi-native (v2, Mimo drives via pi's agent loop).
 engine="$(t_app "$TARGET" engine)"; : "${engine:=${QA_ENGINE:-node-loop}}"
-echo "app healthy; engine=$engine; driving up to $steps steps with $QA_MODEL"
+if [ "$remote_mode" = 1 ]; then echo "engine=$engine; driving $qa_base for up to $steps steps with $QA_MODEL"; else echo "app healthy; engine=$engine; driving up to $steps steps with $QA_MODEL"; fi
 
 case "$engine" in
   flow)
@@ -189,10 +234,11 @@ EOF
       while [ "$a" -le "${FLOW_ATTEMPTS:-2}" ]; do
         fdir="$qadir/flow-$i-a$a"; mkdir -p "$fdir"
         [ "${FLOW_ATTEMPTS:-2}" -gt 1 ] && echo "    attempt $a/${FLOW_ATTEMPTS:-2}"
-        QA_OUT="$fdir" QA_BASE="http://$host:$port" QA_GOAL="$fname" QA_API_BASE="$api_base" \
+        QA_OUT="$fdir" QA_BASE="$qa_base" QA_GOAL="$fname" QA_API_BASE="$api_base" \
         QA_MODEL="$QA_MODEL" QA_MAX_TOOLCALLS="${FLOW_STEPS:-90}" QA_HEADLESS="$QA_HEADLESS" \
         QA_LOGIN_EMAIL="$login_email" QA_LOGIN_PASSWORD="$login_pw" QA_LOGIN_PATH="$login_path" QA_START_PATH="$start_path" \
-        WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" \
+        QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" \
+        WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" WEB3_PK="$web3_pk" WEB3_ALLOW_FUNDED="$web3_allow_funded_flag" \
         run_to "$CMD_TIMEOUT" pi -p -nbt --no-session -e "$ext" \
           --tools browser_snapshot,browser_click,browser_type,browser_upload,browser_navigate,browser_scroll,api_request,report_bug,finish \
           --provider "$QA_PROVIDER" --model "$QA_MODEL" --thinking "$QA_THINKING" --mode json \
@@ -222,10 +268,11 @@ You are an autonomous QA tester driving a REAL web app through browser tools. Wo
 You start already authenticated where applicable — do NOT log out, do NOT visit /login, and do NOT navigate to a different host/port/origin (it loses your session). Explore only within this app.
 Keep it under $steps snapshots. Don't repeat the same action — make progress toward the goal each step.
 EOF
-    QA_OUT="$qadir" QA_BASE="http://$host:$port" QA_SAMPLE="$sample" QA_GOAL="$goal" \
+    QA_OUT="$qadir" QA_BASE="$qa_base" QA_SAMPLE="$sample" QA_GOAL="$goal" \
     QA_MODEL="$QA_MODEL" QA_MAX_TOOLCALLS="$((steps * 2))" QA_HEADLESS="$QA_HEADLESS" \
     QA_LOGIN_EMAIL="$login_email" QA_LOGIN_PASSWORD="$login_pw" QA_LOGIN_PATH="$login_path" QA_START_PATH="$start_path" \
-    WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" \
+    QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" \
+    WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" WEB3_PK="$web3_pk" WEB3_ALLOW_FUNDED="$web3_allow_funded_flag" \
     run_to "$CMD_TIMEOUT" pi -p -nbt --no-session -e "$ext" \
       --tools browser_snapshot,browser_click,browser_type,browser_upload,browser_navigate,browser_scroll,report_bug,finish \
       --provider "$QA_PROVIDER" --model "$QA_MODEL" --thinking "$QA_THINKING" --mode json \
@@ -239,14 +286,14 @@ EOF
   *)  # node-loop (v1)
     NODE_PATH="$SENTINEL_HOME/node_modules" run_to "$CMD_TIMEOUT" \
       node "$SENTINEL_HOME/bin/qa-drive.js" \
-        --base "http://$host:$port" --out "$qadir" --steps "$steps" --goal "$goal" \
+        --base "$qa_base" --out "$qadir" --steps "$steps" --goal "$goal" \
         --provider "$QA_PROVIDER" --model "$QA_MODEL" --thinking "$QA_THINKING" \
         --headless "$QA_HEADLESS" ${sample:+--sample "$sample"} --pi-timeout 120 \
       >>"$rd/run.log" 2>&1 || echo "warn: qa-drive nonzero exit"
     ;;
 esac
 
-teardown; trap - EXIT
+[ "$remote_mode" != 1 ] && { teardown; trap - EXIT; }
 
 rep="$qadir/report.json"
 if [ ! -f "$rep" ]; then
@@ -271,7 +318,7 @@ case "$verdict" in pass) v=pass;; fail) v=fail;; *) v=issues;; esac
 {
   echo "# QA — $TARGET"
   echo; echo "- verdict: **$v**  •  functional bugs: **$bugs**  •  UI/UX findings: **${uiux_count:-0}**  •  steps: $(jq -r '.steps|length' "$rep")  •  model: $QA_MODEL${cost:+  •  cost: \$$cost}"
-  echo "- app: \`$start_cmd\` on 127.0.0.1:$port  •  engine: $engine  •  HEAD: \`${head:0:7}\`"
+  if [ "$remote_mode" = 1 ]; then echo "- app: $qa_base (remote)  •  engine: $engine  •  HEAD: \`${head:0:7}\`"; else echo "- app: \`$start_cmd\` on 127.0.0.1:$port  •  engine: $engine  •  HEAD: \`${head:0:7}\`"; fi
   echo "- screenshots + trace: \`$qadir/report.html\`"
   echo; echo "## Summary"; echo "$summary"
   if [ -f "$qadir/flows.json" ]; then

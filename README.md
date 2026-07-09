@@ -71,8 +71,9 @@ Full architecture: [`docs/DESIGN.md`](docs/DESIGN.md).
 Installed and on `PATH`:
 
 - **[pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent)** — the agent harness, authed for the **Xiaomi/Mimo** provider (`pi` uses `~/.pi/agent/auth.json`; the vision helpers read `.xiaomi.key` from there, or `$XIAOMI_API_KEY`).
-- **node** ≥ 20, **jq**, **git**, **gh** (authed: `gh auth login`), **curl**, **lsof**, **gtimeout** (`brew install coreutils`), **python3**.
-- **Playwright** (installed by `npm install`; reuses the shared chromium cache).
+- **node** ≥ 20, **jq**, **git**, **gh** (authed: `gh auth login`), **curl**, **lsof**, **python3**, and **timeout** (Linux: in coreutils, preinstalled; macOS: `gtimeout` via `brew install coreutils`).
+- **Playwright** (installed by `npm install`; reuses the shared chromium cache). On Linux, install the browser system deps once: `npx playwright install --with-deps chromium`.
+- **OS:** macOS (launchd) or Linux (systemd `--user` timer, with a cron fallback). On a headless Linux server `sentinel install` runs `loginctl enable-linger` so the timer fires while you're logged out — if that needs root, run `sudo loginctl enable-linger $USER`.
 - For the agents you enable: **claude** (docs-sync, brain-sync, optional review), **codex** (optional review).
 - **brain-sync** also needs a local clone of the shared knowledge repo at `BRAIN_PATH` (origin matching `BRAIN_GITHUB`) and `gh` with write access to it. See [`examples/brain-scaffold/SETUP.md`](examples/brain-scaffold/SETUP.md).
 
@@ -91,7 +92,7 @@ cp config/targets.json.example config/targets.json   # register your repos
 
 bin/sentinel doctor                      # verify pi/claude/codex/gh/playwright/ntfy
 bin/sentinel run <target> qa             # try one run
-bin/sentinel install                     # load the 15-min launchd scheduler (24/7)
+bin/sentinel install                     # load the 15-min scheduler (24/7): launchd on macOS, systemd/cron on Linux
 ```
 
 `config/sentinel.env` and `config/targets.json` are **gitignored** — credentials and your registry stay local.
@@ -132,15 +133,36 @@ See [`config/targets.json.example`](config/targets.json.example). Key `qa.app` f
 | field | meaning |
 |---|---|
 | `engine` | `flow` (autonomous deep FE+BE) · `pi-native` (single-goal explore) · `node-loop` (deterministic) |
+| `base_url` | QA an **already-deployed** app at this URL instead of booting locally (no `start_cmd`/`port` needed) — see below |
 | `start_cmd`, `port`, `health_path` | how to boot the app + the URL to health-check |
 | `set_port:false` | multi-process stacks (web+api) — don't force one `PORT` on every child |
 | `aux_ports` | extra services to wait for + reap (e.g. the API on `4000`) |
 | `host` | browser origin — `localhost` vs `127.0.0.1` (matters for CORS/sessions) |
 | `api_base` | backend base URL for the flow engine's `api_request` assertions |
+| `auth` | `{capture_url_re, storage_key}` — how `api_request` gets the app's own bearer (default: sniff the `Authorization` header on `/api/` requests, else a Supabase `localStorage` token). Set `capture_url_re` (a regex string matched against request URLs, e.g. `"mybackend\\.com"`; use `a|b` for alternatives) or `storage_key` (localStorage key holding the token) for non-Supabase apps |
 | `login` | `{path, email_env, password_env}` — Playwright fills the form from env vars (never sent to the model or logged) |
 | `goal` | (pi-native/node-loop only) what to exercise |
 | `branch` + `worktree:true` | QA a *different* branch in a throwaway `git worktree` (real working tree untouched); `install_cmd` + `qa_env` (a gitignored `.env` dropped in as `.env.local`) |
 | `web3` | QA a wallet-gated dApp: inject an **unfunded burner** wallet + stub gate endpoints — see below |
+
+### QA a live/deployed app (no local boot)
+
+Set `base_url` to test an app that's **already running** — a staging deploy, a preview URL, or production — instead of booting it locally. `recon` still reads the local repo to derive the flows; Sentinel just drives the remote origin and asserts its `api_base`. `start_cmd`/`port`/boot/teardown are skipped.
+
+```json
+"qa": {
+  "enabled": true, "cadence": "every:12h",
+  "app": {
+    "engine": "flow",
+    "base_url": "https://staging.example.com",
+    "api_base": "https://api.example.com",
+    "allow_live_data": true,
+    "health_path": "/"
+  }
+}
+```
+
+The `path` at the target level still points at the local repo (for `recon`). Combine with `web3` to drive a deployed wallet-gated dApp. ⚠️ **Fail-closed safety:** a non-local `base_url` (anything but `localhost`/`127.0.0.1`) is **refused** unless you set `allow_live_data: true` — driving a live origin means QA can act on real data (UI actions *and* authenticated `api_request`), so opt in deliberately and scope the `goal`/flows to read-only or non-destructive actions.
 
 ### QA for wallet dApps (web3 mode)
 
@@ -160,12 +182,27 @@ For apps gated behind MetaMask/Rabby, `qa.app.web3` injects a programmatic walle
 
 `whitelist:true` splices the burner address (AES-encrypted with the app's own `NEXT_PUBLIC_CRYPTO_KEY`, read from the QA `.env`) into the `__WL_ADDR__` token so the app sees it as whitelisted. `branch` + `worktree:true` let you QA a branch where the gated UI is live, in a throwaway worktree. The full design is in [`docs/DESIGN.md`](docs/DESIGN.md) (§5c). For real on-chain *execution* without real money, point `rpc` at a local `anvil --fork-url`.
 
+**Specific / funded wallet (advanced).** By default the burner is a fresh random unfunded key. To drive flows that need a real account (e.g. a perps UI that gates trading on a funded venue balance), supply a key and opt in:
+
+```json
+"web3": {
+  "enabled": true, "rpc": "...", "chain_id": 42161,
+  "private_key_env": "MYAPP_QA_WALLET_PK",  // env-var NAME; the key lives in config/sentinel.env, never here
+  "allow_funded": true                       // permit a key with on-chain balance/nonce (relaxes the unfunded preflight)
+}
+```
+
+⚠️ `allow_funded` only relaxes the unfunded preflight — **broadcasts are still blocked** (Sentinel never sends an on-chain tx). A real *fill* can still happen if the app submits trades through its **own backend** (signed action / API), so treat this as live trading: use a **small, capped, dedicated** wallet, keep leverage minimal, and make the flow `goal` close what it opens. The key is referenced by env-var name (value in the gitignored `config/sentinel.env`) and never enters the page, model, trace, or logs.
+
 Proven against a live wallet-gated perpetuals exchange frontend on Arbitrum: from an unfunded burner the agent connected, opened the trade screen, and surfaced **9 functional bugs + 13 UI/UX findings** in a 61-step session for ~$0.28 — with **no transaction ever broadcast**.
 
 Credentials referenced by `email_env`/`password_env` live only in `config/sentinel.env` (gitignored), keyed by the **name** you put in `targets.json`.
 
 ### Tuning the flow engine (env or `config/sentinel.env`)
 `FLOW_MAX` (flows per run, default 2) · `FLOW_ATTEMPTS` (attempts per flow, default 2) · `FLOW_STEPS` (hard tool-call cap per attempt, default 90) · `RUN_WALL_TIMEOUT` (per-run wall cap, default 3600s). A full 2×2 deep run is ~40 min / ~$2 of Mimo.
+
+### Models & providers (OpenRouter, etc.)
+Sentinel is provider-agnostic. The **QA decisions + flow derivation** run through `pi` — set `QA_PROVIDER`/`QA_MODEL` and configure that provider in `pi` itself (e.g. an `openrouter` provider in `~/.pi/agent/auth.json`). The **vision UI/UX pass** calls any OpenAI-compatible `/chat/completions` endpoint — set `VISION_BASE_URL`, `VISION_MODEL`, `VISION_API_KEY` (e.g. point them at `https://openrouter.ai/api/v1`). All default to Xiaomi/Mimo if unset; the old `XIAOMI_*`/`MIMO_VISION_MODEL` names still work as aliases.
 
 ### Configuring brain-sync (env or `config/sentinel.env`)
 The brain location is **global** (one brain for all targets): `BRAIN_PATH` (local clone — leave blank to disable), `BRAIN_GITHUB` (default `Simbastack-hq/simbastack-brain`), `BRAIN_BASE` (default `main`), `ENABLE_BRAIN_PR` (`0` dry-run patch / `1` open PR), `MAX_BRAIN_DIFF_CHARS` (default 80000 — above this it sends a stat+commit-log summary), `BRAIN_MIN_DIFF_LINES` (default 8 — trivial windows below this open no PR). Per target you only set `brain-sync: { enabled, cadence }` in `targets.json` (use `every:24h`, never `on-commit`). Full walkthrough: [`examples/brain-scaffold/SETUP.md`](examples/brain-scaffold/SETUP.md).
@@ -187,7 +224,8 @@ examples/   ready-to-copy targets.json registries + brain-repo scaffold (see exa
 lib/        common.sh  (shared: env, cadence, locking, accessors)
 pi-ext/     qa-browser/  (pi extension: Playwright-backed browser + api_request tools)
 config/     *.example  (copy to the real, gitignored files)
-launchd/    com.sentinel.scheduler.plist
+launchd/    com.sentinel.scheduler.plist   (macOS scheduler)
+systemd/    sentinel.service · sentinel.timer   (Linux scheduler)
 docs/       DESIGN.md
 ```
 

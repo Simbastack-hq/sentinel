@@ -7,7 +7,7 @@ dependencies, only the CLIs it shells out to (`pi`/Mimo, `claude`, `codex`, `gh`
 ## 1. The heartbeat
 
 ```
-launchd ──(every SCHEDULER_INTERVAL, default 900s)──▶ sentinel tick
+scheduler ──(every SCHEDULER_INTERVAL, default 900s)──▶ sentinel tick
                                           │ single-flight lock (var/locks/tick.lock) — ticks never overlap
                                           ▼
                   for each target × enabled agent:
@@ -26,6 +26,7 @@ launchd ──(every SCHEDULER_INTERVAL, default 900s)──▶ sentinel tick
 - **`lib/common.sh`** is the contract: env loading (caller wins; inline comments stripped; command-substitution blocked), ntfy, `targets.json` accessors, per-(target,agent) state, cadence evaluation, locking, `run_to` (timeout wrapper).
 - **`bin/sentinel`** is the CLI + orchestration. `tick` is the heartbeat; `run` forces one agent.
 - **`agents/*.sh`** are pure: read env, do work, emit `report.md` + `result.json`.
+- **Scheduler is OS-portable.** `sentinel install` picks the backend from `uname -s`: **launchd** on macOS (`launchd/com.sentinel.scheduler.plist`, `StartInterval`), **systemd `--user` timer** on Linux (`systemd/sentinel.{service,timer}`, `OnUnitActiveSec` + `Persistent=true`, with `loginctl enable-linger` so it runs headless), falling back to **cron** when no user-systemd session exists. All three just fire `sentinel tick` on an interval and append to `var/scheduler.log`; `tick` itself, the agents, and `run_to` (which prefers `gtimeout`, else `timeout`) are platform-agnostic.
 
 **Cadence:** `on-commit` compares `git HEAD` to the stored `lastRunSha`; `every:<dur>` compares `now − lastRunEpoch`. State in `var/state/` survives reboots.
 
@@ -55,6 +56,8 @@ Pipeline per run:
 ## 4. qa — three engines
 
 Shared boot path (in `agents/qa.sh`): pre-check every port is free (won't boot over / kill a process it didn't start) → boot `start_cmd` on localhost (plain background boot so interactive dev servers like `next dev` survive — a detached session would kill them) → health-check the web port → wait for `aux_ports` (e.g. the API) → run the engine → tear down the **whole process tree** (kill the boot pid + children, reap the ports, and `pkill` by repo path/basename to catch `pnpm --filter`/`tsx watch` stragglers).
+
+**Remote mode (`base_url`):** to QA an already-deployed app (staging/preview/prod), set `base_url` and the boot/teardown path is skipped entirely — Sentinel just confirms the URL answers and drives it. `recon` still runs against the local repo to derive the flows, so flow quality is unchanged; only the *target* moves from a local process to a live origin. `api_base` defaults to `base_url` when unset.
 
 ### node-loop (v1)
 A deterministic Node loop (`bin/qa-drive.js`) owns control flow; Mimo is a **toolless one-shot brain** (`pi -nt`) called once per step (observe DOM → decide action → Playwright executes). Cheapest, most predictable.
@@ -114,6 +117,7 @@ agents/qa.sh                          pi-ext/qa-browser/web3.ts (installWeb3)
 - **No funds can move.** The key is a **fresh random unfunded burner** (per run). Broadcast is blocked **structurally**: a deny-by-prefix rule (`eth_send*`, `eth_signTransaction`, `wallet_send*`, `eth_submit*`) means no transaction is ever signed-and-sent, regardless of casing or funding; only an explicit **read-only allow-list** proxies to the RPC, anything else is refused. A **fail-closed preflight** asserts the burner is on the configured chain with **zero balance and zero nonce** (or aborts the run); message/typed-data signing is allowed (no money moves) but refused for a foreign `chainId`.
 - **Gate stubbing.** `web3.stubs` fulfills the app's gate endpoints at the network layer: a whitelist stub AES-encrypts the burner address with the app's own `NEXT_PUBLIC_CRYPTO_KEY` (single source of truth, read from the same QA `.env`) so the app decrypts it to a whitelisted address; geo/health stubs return allowed/healthy. No app code is touched.
 - **Branch + worktree boot.** `branch` + `worktree:true` boot a *different* branch (e.g. where the trade UI is live) in a throwaway `git worktree` — the real working tree is never touched — with a gitignored QA `.env.local` and a bounded `install_cmd`. The real backend is **never run**; a loopback-`MONGODB_URI` assertion refuses to drive if the QA env could reach a real DB.
+- **Specific / funded wallet (opt-in).** `web3.private_key_env` supplies a chosen key by env-var **name** (value in the gitignored `config/sentinel.env`, never logged), and `web3.allow_funded` relaxes *only* the unfunded preflight — for a **small capped canary** when the UI gates on a real funded venue balance. The broadcast deny-list is unchanged, so Sentinel still never sends an on-chain tx; a real *fill* only occurs if the app submits via its own backend (signed action/API), so the goal must keep size/leverage minimal and close what it opens.
 
 This tests the full wallet-gated frontend (connect → trade form → quotes/validation → the approve/open path) end to end; on-chain submission hits the unfunded wall (`insufficient funds`), which the goal tells the agent is **expected**, so it focuses on rendering/quote/validation/state bugs. For real on-chain *execution* without real money, point `web3.rpc` at a local `anvil --fork-url` of the chain (the deny-list still blocks accidental mainnet broadcast).
 

@@ -1,0 +1,15 @@
+# Template installed to ~/.config/systemd/user/sentinel.timer by `sentinel install` on Linux
+# (it fills in the interval). The launchd StartInterval equivalent.
+[Unit]
+Description=Sentinel scheduler heartbeat (every __INTERVAL__s)
+
+[Timer]
+# First run shortly after boot/login, then __INTERVAL__s after each run finishes.
+OnBootSec=2min
+OnUnitActiveSec=__INTERVAL__s
+AccuracySec=30s
+# Catch up a missed tick if the machine was asleep/off at the scheduled time.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
