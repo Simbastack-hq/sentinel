@@ -160,7 +160,7 @@ For apps gated behind MetaMask/Rabby, `qa.app.web3` injects a programmatic walle
 
 `whitelist:true` splices the burner address (AES-encrypted with the app's own `NEXT_PUBLIC_CRYPTO_KEY`, read from the QA `.env`) into the `__WL_ADDR__` token so the app sees it as whitelisted. `branch` + `worktree:true` let you QA a branch where the gated UI is live, in a throwaway worktree. The full design is in [`docs/DESIGN.md`](docs/DESIGN.md) (§5c). For real on-chain *execution* without real money, point `rpc` at a local `anvil --fork-url`.
 
-Proven against a live wallet-gated perpetuals exchange frontend on Arbitrum: from an unfunded burner the agent connected, opened the trade screen, and surfaced **9 functional bugs + 13 UI/UX findings** in a 49-step session for ~$0.28 — with **no transaction ever broadcast**.
+Proven against a live wallet-gated perpetuals exchange frontend on Arbitrum: from an unfunded burner the agent connected, opened the trade screen, and surfaced **9 functional bugs + 13 UI/UX findings** in a 61-step session for ~$0.28 — with **no transaction ever broadcast**.
 
 Credentials referenced by `email_env`/`password_env` live only in `config/sentinel.env` (gitignored), keyed by the **name** you put in `targets.json`.
 
