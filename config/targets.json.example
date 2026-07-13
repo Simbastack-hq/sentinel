@@ -45,11 +45,20 @@
             "api_base": "http://localhost:4000",
             "boot_timeout": 120,
             "uiux_review": true,
+            "plan_file": "",
+            "pre_cmd": "",
+            "post_cmd": "",
             "login": {
               "path": "/login",
               "email_env": "MYAPP_QA_EMAIL",
               "password_env": "MYAPP_QA_PASSWORD"
             }
+          },
+          "issues": {
+            "_comment": "Optional: file each NEW functional bug as a GitHub issue (gh auth required). Dedup is persisted per target, so re-found bugs are never re-filed. plan_file (app, above) = hand-authored critical_flows JSON used verbatim (skips recon — for routers recon can't read, or curated flows). pre_cmd gates the run (nonzero exit aborts — e.g. a canary balance check); post_cmd always runs after the engine (e.g. a janitor).",
+            "repo": "your-org/my-pms",
+            "min_severity": "medium",
+            "max_per_run": 5
           }
         },
         "review": { "enabled": false, "cadence": "on-commit" },

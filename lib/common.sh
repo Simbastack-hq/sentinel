@@ -29,7 +29,7 @@ RUNS="$VAR/runs"; STATE="$VAR/state"; LOCKS="$VAR/locks"; REPORTS="$SENTINEL_HOM
 mkdir -p "$RUNS" "$STATE" "$LOCKS" "$REPORTS"
 
 # Defaults (mirror sentinel.env.example so the system works even with no env file).
-: "${NTFY_SERVER:=https://ntfy.sh}"; : "${NTFY_TOPIC:=}"; : "${ENABLE_NOTIFY:=1}"
+: "${NTFY_SERVER:=https://ntfy.sh}"; : "${NTFY_TOPIC:=}"; : "${ENABLE_NOTIFY:=1}"; : "${NOTIFY_WEBHOOK_URL:=}"
 : "${SCHEDULER_INTERVAL:=900}"
 : "${RUN_WALL_TIMEOUT:=3600}"; : "${CMD_TIMEOUT:=900}"; : "${MAX_REVIEW_DIFF_CHARS:=40000}"
 : "${REVIEW_ENGINE:=pi}"; : "${REVIEW_THINKING:=low}"; : "${REVIEW_LOOKBACK:=6}"; : "${REVIEW_TIMEOUT:=240}"; : "${CODEX_MODEL:=gpt-5.5}"; : "${ENABLE_REVIEW_PR_COMMENT:=0}"
@@ -57,6 +57,15 @@ notify(){ # title body
   [ "${ENABLE_NOTIFY:-1}" = 1 ] || return 0
   [ -n "${NTFY_TOPIC:-}" ] || { log "(notify skipped: NTFY_TOPIC unset)"; return 0; }
   curl -fsS -H "Title: $1" -d "$2" "$NTFY_SERVER/$NTFY_TOPIC" >/dev/null 2>&1 || true
+}
+
+notify_webhook(){ # content — posts to NOTIFY_WEBHOOK_URL. Dual-key payload: Discord reads "content"
+  # (ignores unknown fields), Slack incoming webhooks read "text" — one payload serves both.
+  [ "${ENABLE_NOTIFY:-1}" = 1 ] || return 0
+  [ -n "${NOTIFY_WEBHOOK_URL:-}" ] || return 0
+  # Discord caps content at 2000 chars; truncate defensively for any webhook host.
+  jq -n --arg c "${1:0:1900}" '{content:$c, text:$c}' | \
+    curl -fsS -H 'Content-Type: application/json' -d @- "$NOTIFY_WEBHOOK_URL" >/dev/null 2>&1 || true
 }
 
 # ---- targets.json accessors ----

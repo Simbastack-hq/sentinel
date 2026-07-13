@@ -182,12 +182,44 @@ fi   # end local-boot block
 engine="$(t_app "$TARGET" engine)"; : "${engine:=${QA_ENGINE:-node-loop}}"
 if [ "$remote_mode" = 1 ]; then echo "engine=$engine; driving $qa_base for up to $steps steps with $QA_MODEL"; else echo "app healthy; engine=$engine; driving up to $steps steps with $QA_MODEL"; fi
 
+# Operator hooks (optional). pre_cmd GATES the run — nonzero exit aborts before the agent drives
+# anything (e.g. a canary-wallet balance-floor check); post_cmd always runs after the engine while
+# the app is still up (e.g. a janitor that closes anything a trading run left open). Both run from
+# the target path with the run's QA context in env; secrets stay env-var-shaped (never in targets.json).
+pre_cmd="$(t_app "$TARGET" pre_cmd)"; post_cmd="$(t_app "$TARGET" post_cmd)"
+if [ -n "$pre_cmd" ]; then
+  echo "pre_cmd gate: $pre_cmd"
+  if ! ( cd "$path" && RUN_DIR="$rd" QA_BASE="$qa_base" QA_API_BASE="$api_base" WEB3_PK="$web3_pk" \
+         run_to "${HOOK_TIMEOUT:-300}" bash -lc "$pre_cmd" ) >>"$rd/run.log" 2>&1; then
+    echo "pre_cmd exited nonzero — aborting run before driving the app"
+    { echo "# QA — $TARGET — pre_cmd gate failed"; echo; echo "\`$pre_cmd\` exited nonzero, so the run was aborted before the agent drove anything. See run.log for the hook's output."; } > "$rd/report.md"
+    result error "pre_cmd gate failed" 0 "" false "$head"; exit 0
+  fi
+fi
+
 case "$engine" in
   flow)
     # Autonomous deep QA: recon the repo → derive critical business flows (cached per commit) → run each
     # top flow as a deep agent session that asserts state in the UI AND the backend API.
     ext="$SENTINEL_HOME/pi-ext/qa-browser/index.ts"
     plan_dir="$VAR/plans"; mkdir -p "$plan_dir"; plan="$plan_dir/${TARGET}-${head:0:12}.json"
+    # Static plan (optional): a hand-authored critical_flows JSON used VERBATIM — recon+derive are
+    # skipped. Used DIRECTLY (never copied into the derived-plan cache, so removing/repointing
+    # plan_file can't leave a stale static plan behind). Fail CLOSED on an invalid file: the
+    # operator chose curated flows deliberately — silently exploring a live target with
+    # recon-derived flows instead is exactly what they opted out of.
+    plan_static="$(t_app "$TARGET" plan_file)"
+    if [ -n "$plan_static" ]; then
+      case "$plan_static" in /*) : ;; *) plan_static="$SENTINEL_HOME/$plan_static" ;; esac
+      if jq -e '(.critical_flows | type) == "array" and (.critical_flows | length) > 0' "$plan_static" >/dev/null 2>&1; then
+        echo "using static plan_file: $plan_static"
+        plan="$plan_static"
+      else
+        echo "plan_file '$plan_static' is missing, unreadable, or has no critical_flows array — refusing to fall back to derived flows"
+        { echo "# QA — $TARGET — invalid plan_file"; echo; echo "\`plan_file\` is configured but \`$plan_static\` is missing/invalid (needs a non-empty \`critical_flows\` array). Fix the file or unset \`plan_file\`."; } > "$rd/report.md"
+        result error "invalid plan_file" 0 "" false "$head"; exit 0
+      fi
+    fi
     if [ ! -s "$plan" ]; then
       echo "recon + deriving test plan (Mimo from code structure)..."
       digest="$(node "$SENTINEL_HOME/bin/recon.js" "$path" 2>>"$rd/run.log")"
@@ -293,6 +325,14 @@ EOF
     ;;
 esac
 
+# post_cmd runs while the app (local mode) is still up, on every engine outcome — a janitor here can
+# reach both the app and the backend. Failure is reported but never fails the run.
+if [ -n "$post_cmd" ]; then
+  echo "post_cmd: $post_cmd"
+  ( cd "$path" && RUN_DIR="$rd" QA_BASE="$qa_base" QA_API_BASE="$api_base" WEB3_PK="$web3_pk" \
+    run_to "${HOOK_TIMEOUT:-300}" bash -lc "$post_cmd" ) >>"$rd/run.log" 2>&1 || echo "warn: post_cmd exited nonzero (see run.log)"
+fi
+
 [ "$remote_mode" != 1 ] && { teardown; trap - EXIT; }
 
 rep="$qadir/report.json"
@@ -343,5 +383,60 @@ case "$verdict" in pass) v=pass;; fail) v=fail;; *) v=issues;; esac
 
 [ "$engine" = flow ] && node "$SENTINEL_HOME/bin/render-report.js" "$qadir" >>"$rd/run.log" 2>&1
 cp "$qadir/report.html" "$rd/artifacts/report.html" 2>/dev/null || true
+
+# Findings → tracker (optional, qa.issues.repo): file each NEW functional bug as a GitHub issue.
+# Dedup is persisted per target (var/state/<target>__qa-issues.json keyed by a normalized-description
+# hash), so the same bug found on a later run is never re-filed. max_per_run caps a pathological run
+# from flooding the tracker; capped-out findings stay in the report. Issue URLs land in the report,
+# and in result.json (.issue_urls) so the dispatch webhook brief links them.
+issues_repo="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.issues.repo // ""' "$TARGETS_JSON" 2>/dev/null)"
+issue_urls="[]"
+if [ -n "$issues_repo" ] && [ "$bugs" -gt 0 ] 2>/dev/null; then
+  issues_min="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.issues.min_severity // "medium"' "$TARGETS_JSON" 2>/dev/null)"
+  issues_max="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.issues.max_per_run // 5' "$TARGETS_JSON" 2>/dev/null)"
+  # Flood cap must fail CLOSED: a malformed max_per_run falls back to the default, never to "unlimited".
+  case "$issues_max" in ''|*[!0-9]*) echo "warn: qa.issues.max_per_run '$issues_max' is not a number — using 5"; issues_max=5;; esac
+  sev_rank(){ case "$1" in critical) echo 3;; high) echo 2;; medium) echo 1;; *) echo 0;; esac; }
+  hash_stdin(){ if have sha256sum; then sha256sum; else shasum -a 256; fi; }
+  min_rank="$(sev_rank "$issues_min")"
+  seen_f="$STATE/${TARGET}__qa-issues.json"; [ -f "$seen_f" ] || echo '{}' > "$seen_f"
+  # Corrupt dedup state must fail CLOSED (skip filing, findings stay in the report) — filing with
+  # broken state would re-file every historical bug as new.
+  if ! jq -e 'type == "object"' "$seen_f" >/dev/null 2>&1; then
+    echo "warn: issue-dedup state $seen_f is corrupt — SKIPPING issue filing this run (findings remain in the report; fix or delete the file)"
+  else
+  filed=0
+  while IFS=$'\t' read -r sev desc; do
+    [ -n "$desc" ] || continue
+    [ "$(sev_rank "$sev")" -lt "$min_rank" ] && continue
+    # Dedup key: normalized description (lowercased, whitespace-squeezed, first 160 chars) — severity-agnostic
+    # so a re-grade of the same finding doesn't double-file.
+    key="$(printf '%s' "$desc" | tr '[:upper:]' '[:lower:]' | tr -s '[:space:]' ' ' | cut -c1-160 | hash_stdin | cut -d' ' -f1)"
+    [ -n "$(jq -r --arg k "$key" '.[$k] // empty' "$seen_f")" ] && continue
+    if [ "$filed" -ge "$issues_max" ]; then echo "issue cap ($issues_max) reached — remaining new findings stay in the report"; break; fi
+    title="[sentinel-qa] $sev: $(printf '%s' "$desc" | cut -c1-90)"
+    body="Found by a scheduled Sentinel QA run against \`$qa_base\`.
+
+**Severity:** $sev
+
+$desc
+
+_run \`${RUN_ID:-?}\` • verdict $v • $(date -u '+%Y-%m-%d %H:%MZ')_"
+    if url="$(gh issue create --repo "$issues_repo" --title "$title" --body "$body" 2>>"$rd/run.log")"; then
+      tmp="$(mktemp)"; jq --arg k "$key" --arg u "$url" '.[$k]=$u' "$seen_f" > "$tmp" && mv "$tmp" "$seen_f"
+      issue_urls="$(jq -c --arg u "$url" '. + [$u]' <<<"$issue_urls")"
+      filed=$((filed+1))
+    else
+      echo "warn: gh issue create failed for: $title"
+    fi
+  done < <(jq -r '.bugs[] | [.severity, .desc] | @tsv' "$rep" 2>/dev/null)
+  if [ "$filed" -gt 0 ]; then
+    { echo; echo "## Filed issues"; jq -r '.[]' <<<"$issue_urls" | sed 's/^/- /'; } >> "$rd/report.md"
+    echo "filed $filed new issue(s) on $issues_repo"
+  fi
+  fi   # end corrupt-state guard
+fi
+
 result "$v" "${summary:0:180} • ${uiux_count:-0} UI/UX findings" "$bugs" "$cost" false "$head"
+[ "$issue_urls" != "[]" ] && { tmp="$(mktemp)"; jq --argjson iu "$issue_urls" '.issue_urls=$iu' "$rd/result.json" > "$tmp" && mv "$tmp" "$rd/result.json"; }
 echo "done: $v ($bugs functional bugs, ${uiux_count:-0} UI/UX findings)"

@@ -67,7 +67,15 @@ dispatch_run(){
 
   local emoji="✅"; case "$verdict" in fail|error|timeout) emoji="❌";; warn|issues) emoji="⚠️";; skipped) emoji="⏭️";; esac
   log "$emoji $t/$a → $verdict  ${findings:+(${findings} findings) }${cost:+\$$cost }$id"
-  [ "$skipped" = true ] || notify "sentinel $a: $t → $verdict" "${summary:0:240}${findings:+ • ${findings} findings}${cost:+ • \$$cost}"
+  if [ "$skipped" != true ]; then
+    notify "sentinel $a: $t → $verdict" "${summary:0:240}${findings:+ • ${findings} findings}${cost:+ • \$$cost}"
+    # Webhook brief (Discord/Slack incoming webhook): same summary, plus any tracker links the agent
+    # filed this run (result.json .issue_urls — see the qa agent's issue filing).
+    local issue_urls=""
+    [ -f "$rd/result.json" ] && issue_urls="$(jq -r '(.issue_urls // [])[]' "$rd/result.json" 2>/dev/null | head -8)"
+    notify_webhook "$emoji **sentinel $a: $t → $verdict** — ${summary:0:300}${findings:+ • ${findings} findings}${cost:+ • \$$cost}${issue_urls:+
+$issue_urls}"
+  fi
 }
 
 cmd_tick(){

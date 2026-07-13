@@ -144,6 +144,11 @@ See [`config/targets.json.example`](config/targets.json.example). Key `qa.app` f
 | `goal` | (pi-native/node-loop only) what to exercise |
 | `branch` + `worktree:true` | QA a *different* branch in a throwaway `git worktree` (real working tree untouched); `install_cmd` + `qa_env` (a gitignored `.env` dropped in as `.env.local`) |
 | `web3` | QA a wallet-gated dApp: inject an **unfunded burner** wallet + stub gate endpoints — see below |
+| `plan_file` | (flow engine) hand-authored `critical_flows` JSON used **verbatim** — recon+derive skipped. For routers recon can't read, or when you curate the flows |
+| `pre_cmd` / `post_cmd` | operator hooks: `pre_cmd` **gates** the run (nonzero exit aborts — e.g. a canary-wallet balance floor); `post_cmd` always runs after the engine (e.g. a janitor that closes what a trading run left open) |
+| `qa.issues` (sibling of `app`) | `{repo, min_severity, max_per_run}` — file each **new** functional bug as a GitHub issue via `gh`, deduped persistently per target; issue links land in the report + the webhook brief |
+
+Run briefs also post to `NOTIFY_WEBHOOK_URL` (Discord/Slack incoming webhook) when set in `config/sentinel.env`, alongside ntfy.
 
 ### QA a live/deployed app (no local boot)
 
