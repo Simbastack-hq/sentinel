@@ -59,11 +59,12 @@ notify(){ # title body
   curl -fsS -H "Title: $1" -d "$2" "$NTFY_SERVER/$NTFY_TOPIC" >/dev/null 2>&1 || true
 }
 
-notify_webhook(){ # content — posts {"content": ...} to NOTIFY_WEBHOOK_URL (Discord/Slack-compatible incoming webhook)
+notify_webhook(){ # content — posts to NOTIFY_WEBHOOK_URL. Dual-key payload: Discord reads "content"
+  # (ignores unknown fields), Slack incoming webhooks read "text" — one payload serves both.
   [ "${ENABLE_NOTIFY:-1}" = 1 ] || return 0
   [ -n "${NOTIFY_WEBHOOK_URL:-}" ] || return 0
   # Discord caps content at 2000 chars; truncate defensively for any webhook host.
-  jq -n --arg c "${1:0:1900}" '{content:$c}' | \
+  jq -n --arg c "${1:0:1900}" '{content:$c, text:$c}' | \
     curl -fsS -H 'Content-Type: application/json' -d @- "$NOTIFY_WEBHOOK_URL" >/dev/null 2>&1 || true
 }
 

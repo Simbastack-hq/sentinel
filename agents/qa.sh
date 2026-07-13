@@ -204,15 +204,20 @@ case "$engine" in
     ext="$SENTINEL_HOME/pi-ext/qa-browser/index.ts"
     plan_dir="$VAR/plans"; mkdir -p "$plan_dir"; plan="$plan_dir/${TARGET}-${head:0:12}.json"
     # Static plan (optional): a hand-authored critical_flows JSON used VERBATIM — recon+derive are
-    # skipped. For apps recon can't read (non-Next.js routers) or when the operator curates the flows.
+    # skipped. Used DIRECTLY (never copied into the derived-plan cache, so removing/repointing
+    # plan_file can't leave a stale static plan behind). Fail CLOSED on an invalid file: the
+    # operator chose curated flows deliberately — silently exploring a live target with
+    # recon-derived flows instead is exactly what they opted out of.
     plan_static="$(t_app "$TARGET" plan_file)"
     if [ -n "$plan_static" ]; then
       case "$plan_static" in /*) : ;; *) plan_static="$SENTINEL_HOME/$plan_static" ;; esac
-      if jq -e '.critical_flows | length > 0' "$plan_static" >/dev/null 2>&1; then
+      if jq -e '(.critical_flows | type) == "array" and (.critical_flows | length) > 0' "$plan_static" >/dev/null 2>&1; then
         echo "using static plan_file: $plan_static"
-        cp "$plan_static" "$plan"
+        plan="$plan_static"
       else
-        echo "warn: plan_file '$plan_static' unreadable or has no critical_flows — falling back to recon"
+        echo "plan_file '$plan_static' is missing, unreadable, or has no critical_flows array — refusing to fall back to derived flows"
+        { echo "# QA — $TARGET — invalid plan_file"; echo; echo "\`plan_file\` is configured but \`$plan_static\` is missing/invalid (needs a non-empty \`critical_flows\` array). Fix the file or unset \`plan_file\`."; } > "$rd/report.md"
+        result error "invalid plan_file" 0 "" false "$head"; exit 0
       fi
     fi
     if [ ! -s "$plan" ]; then
@@ -389,10 +394,17 @@ issue_urls="[]"
 if [ -n "$issues_repo" ] && [ "$bugs" -gt 0 ] 2>/dev/null; then
   issues_min="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.issues.min_severity // "medium"' "$TARGETS_JSON" 2>/dev/null)"
   issues_max="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.issues.max_per_run // 5' "$TARGETS_JSON" 2>/dev/null)"
+  # Flood cap must fail CLOSED: a malformed max_per_run falls back to the default, never to "unlimited".
+  case "$issues_max" in ''|*[!0-9]*) echo "warn: qa.issues.max_per_run '$issues_max' is not a number — using 5"; issues_max=5;; esac
   sev_rank(){ case "$1" in critical) echo 3;; high) echo 2;; medium) echo 1;; *) echo 0;; esac; }
   hash_stdin(){ if have sha256sum; then sha256sum; else shasum -a 256; fi; }
   min_rank="$(sev_rank "$issues_min")"
   seen_f="$STATE/${TARGET}__qa-issues.json"; [ -f "$seen_f" ] || echo '{}' > "$seen_f"
+  # Corrupt dedup state must fail CLOSED (skip filing, findings stay in the report) — filing with
+  # broken state would re-file every historical bug as new.
+  if ! jq -e 'type == "object"' "$seen_f" >/dev/null 2>&1; then
+    echo "warn: issue-dedup state $seen_f is corrupt — SKIPPING issue filing this run (findings remain in the report; fix or delete the file)"
+  else
   filed=0
   while IFS=$'\t' read -r sev desc; do
     [ -n "$desc" ] || continue
@@ -422,6 +434,7 @@ _run \`${RUN_ID:-?}\` • verdict $v • $(date -u '+%Y-%m-%d %H:%MZ')_"
     { echo; echo "## Filed issues"; jq -r '.[]' <<<"$issue_urls" | sed 's/^/- /'; } >> "$rd/report.md"
     echo "filed $filed new issue(s) on $issues_repo"
   fi
+  fi   # end corrupt-state guard
 fi
 
 result "$v" "${summary:0:180} • ${uiux_count:-0} UI/UX findings" "$bugs" "$cost" false "$head"
