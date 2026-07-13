@@ -65,6 +65,8 @@ A deterministic Node loop (`bin/qa-drive.js`) owns control flow; Mimo is a **too
 ### pi-native (v2)
 A pi extension (`pi-ext/qa-browser/`) registers Playwright-backed tools; **Mimo drives them inside pi's own agent loop** with full session memory. Deeper exploration of a single goal.
 
+**Operator hooks + findings routing:** `pre_cmd` runs before the engine and **gates** the run (nonzero exit aborts — the place for a canary-wallet balance-floor check); `post_cmd` always runs after the engine while the app is still reachable (the place for a janitor that closes anything a trading run left open). When `qa.issues.repo` is set, each **new** functional bug is filed as a GitHub issue (`gh`), deduped against a persistent per-target state file (normalized-description hash) so re-found bugs never re-file; `max_per_run` caps tracker floods. Run briefs go to ntfy and, when `NOTIFY_WEBHOOK_URL` is set, to a Discord/Slack-compatible webhook with the filed issue links.
+
 ### flow (v3) — autonomous, codebase-aware, deep FE+BE
 The headline. Pipeline:
 
@@ -91,7 +93,7 @@ render-report.js  →  one combined report.html (flows, FE+BE bugs, UI/UX, links
 ```
 
 **Why each piece:**
-- **recon (deterministic) before derive (model):** blind LLM exploration of a monorepo is slow; a fast grep/find digest is what the model actually needs to reason well.
+- **recon (deterministic) before derive (model):** blind LLM exploration of a monorepo is slow; a fast grep/find digest is what the model actually needs to reason well. When recon can't read the app's router (it understands Next.js today) — or the operator wants curated flows — `plan_file` supplies a hand-authored `critical_flows` JSON that is used verbatim and skips recon+derive entirely.
 - **`api_request` tool:** runs `fetch` *inside the page*, reusing the frontend's own captured `Authorization` header — so it asserts real backend state (record fields, status transitions, availability) with the logged-in session. This is how it catches backend-only bugs and UI↔backend mismatches.
 - **Multi-attempt union:** a single autonomous run is non-deterministic (one attempt may find 0 bugs, another 5). Running each flow N times and unioning findings turns that variance into reliable coverage.
 - **Hard step cap:** a soft "you're over budget" nudge gets ignored; the action tools physically refuse past `FLOW_STEPS`, bounding cost and wall-clock.
