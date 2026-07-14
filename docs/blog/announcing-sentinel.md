@@ -108,4 +108,4 @@ The one hard prerequisite is the `pi` CLI authed with a Xiaomi key, since Mimo m
 
 Point it at something real and see what it finds. PRs and issues welcome.
 
-— Hemanshu, building Sentinel at [Wipiway](https://wipiway.com)
+— Hemanshu, building Sentinel at [SimbaStack](https://simbastack.com)
