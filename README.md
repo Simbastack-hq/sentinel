@@ -145,6 +145,9 @@ See [`config/targets.json.example`](config/targets.json.example). Key `qa.app` f
 | `branch` + `worktree:true` | QA a *different* branch in a throwaway `git worktree` (real working tree untouched); `install_cmd` + `qa_env` (a gitignored `.env` dropped in as `.env.local`) |
 | `web3` | QA a wallet-gated dApp: inject an **unfunded burner** wallet + stub gate endpoints — see below |
 | `plan_file` | (flow engine) hand-authored `critical_flows` JSON used **verbatim** — recon+derive skipped. For routers recon can't read, or when you curate the flows |
+| `model` / `provider` / `thinking` | per-target model override (falls back to the global `QA_MODEL`/`QA_PROVIDER`/`QA_THINKING`) — run a cheap model frequently and a strong one nightly from one sentinel |
+| `flow_max` / `flow_attempts` / `flow_steps` | per-target flow-engine depth (falls back to the `FLOW_*` env) |
+| `seed_local_storage` | `{key: value}` seeded into `localStorage` before first navigation — UX state only (dismiss first-visit onboarding/terms modals that would block the agent), **never** auth/token keys; `_`-prefixed keys are comments |
 | `pre_cmd` / `post_cmd` | operator hooks: `pre_cmd` **gates** the run (nonzero exit aborts — e.g. a canary-wallet balance floor); `post_cmd` always runs after the engine (e.g. a janitor that closes what a trading run left open) |
 | `qa.issues` (sibling of `app`) | `{repo, min_severity, max_per_run}` — file each **new** functional bug as a GitHub issue via `gh`, deduped persistently per target; issue links land in the report + the webhook brief |
 

@@ -48,6 +48,13 @@
             "plan_file": "",
             "pre_cmd": "",
             "post_cmd": "",
+            "model": "",
+            "provider": "",
+            "thinking": "",
+            "flow_max": "",
+            "flow_attempts": "",
+            "flow_steps": "",
+            "seed_local_storage": {},
             "login": {
               "path": "/login",
               "email_env": "MYAPP_QA_EMAIL",
