@@ -100,10 +100,10 @@ _t_thinking="$(t_app "$TARGET" thinking)";  [ -n "$_t_thinking" ] && QA_THINKING
 # crash bash arithmetic or turn a run into an unbounded session.
 _num_knob(){ # raw min max fallback
   local raw="$1" min="$2" max="$3" fb="$4" n
-  case "$raw" in ''|*[!0-9]*) warn "qa.app knob '$raw' is not a positive integer — using $fb"; echo "$fb"; return;; esac
-  if [ "${#raw}" -gt 4 ]; then warn "qa.app knob '$raw' out of range — using $fb"; echo "$fb"; return; fi
+  case "$raw" in ''|*[!0-9]*) warn "flow knob '$raw' is not a positive integer — using $fb"; echo "$fb"; return;; esac
+  if [ "${#raw}" -gt 4 ]; then warn "flow knob '$raw' out of range — using $fb"; echo "$fb"; return; fi
   n=$((10#$raw))
-  if [ "$n" -ge "$min" ] && [ "$n" -le "$max" ]; then echo "$n"; else warn "qa.app knob '$raw' outside [$min,$max] — using $fb"; echo "$fb"; fi
+  if [ "$n" -ge "$min" ] && [ "$n" -le "$max" ]; then echo "$n"; else warn "flow knob '$raw' outside [$min,$max] — using $fb"; echo "$fb"; fi
 }
 # Normalize the GLOBAL env values first (same rules, hard fallbacks) — a typo'd sentinel.env value
 # must fail closed exactly like a typo'd per-target one — then apply the per-target overrides.
