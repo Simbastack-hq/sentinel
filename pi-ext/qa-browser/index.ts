@@ -125,6 +125,21 @@ async function ensurePage(): Promise<Page> {
       }
     }
   }
+  // Seed localStorage UX-state keys (config-driven, generic) BEFORE the first navigation so the app reads
+  // them at mount — e.g. suppress a first-visit onboarding/terms modal that would otherwise block the QA
+  // agent. UX-STATE ONLY (never auth/token-shaped values); "_"-prefixed keys are treated as comments.
+  if (process.env.QA_SEED_STORAGE) {
+    try {
+      const seed = JSON.parse(process.env.QA_SEED_STORAGE);
+      const entries = (seed && typeof seed === "object" ? Object.entries(seed) : []).filter(([k]) => !k.startsWith("_"));
+      if (entries.length) {
+        await page.addInitScript((kv: [string, unknown][]) => {
+          try { for (const [k, v] of kv) window.localStorage.setItem(k, String(v)); } catch {}
+        }, entries);
+        trace.push({ n: 0, action: { type: "seed_storage" }, observation: `seeded localStorage keys: ${entries.map(([k]) => k).join(", ")}`, result: "", screenshot: "" });
+      }
+    } catch { /* malformed QA_SEED_STORAGE — skip seeding */ }
+  }
   if (LOGIN_EMAIL && LOGIN_PASSWORD) {
     loginAttempted = true; loginOk = false;
     const loginUrl = BASE.replace(/\/$/, "") + LOGIN_PATH;

@@ -65,6 +65,9 @@ qa_install="$(t_app "$TARGET" install_cmd)"
 qa_env_file="$(t_app "$TARGET" qa_env)"   # gitignored .env dropped into the app dir as .env.local before boot
 case "$qa_env_file" in /*|"") : ;; *) qa_env_file="$SENTINEL_HOME/$qa_env_file" ;; esac
 start_path="$(t_app "$TARGET" start_path)"   # path the agent opens first (default "/"); use when "/" needs a backend
+# Seed localStorage UX-state (config-driven, generic): e.g. skip a first-visit onboarding/terms modal that
+# would block the agent. UX-STATE ONLY — never auth/token keys. Keys/values (+ a "_comment") in targets.json.
+qa_seed_storage="$(jq -c --arg t "$TARGET" '.targets[$t].agents.qa.app.seed_local_storage // {}' "$TARGETS_JSON" 2>/dev/null)"
 # Web3 dApp mode (optional): inject an UNFUNDED burner wallet + gate stubs (see pi-ext/qa-browser/web3.ts).
 # The wallet key never enters the page/model/logs; transactions are never broadcast — no real funds can move.
 web3_enabled="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.enabled // false' "$TARGETS_JSON" 2>/dev/null)"
@@ -180,6 +183,19 @@ done
 fi   # end local-boot block
 # Engine: node-loop (v1, deterministic; default) or pi-native (v2, Mimo drives via pi's agent loop).
 engine="$(t_app "$TARGET" engine)"; : "${engine:=${QA_ENGINE:-node-loop}}"
+
+# Per-target model/depth overrides (fall back to the global env): lets one sentinel run a two-tier
+# fleet — a cheap frequent target and a deep nightly target with a stronger model and more
+# flows/attempts/steps. Numeric knobs fail CLOSED to the env/global default on a malformed value.
+_t_model="$(t_app "$TARGET" model)";        [ -n "$_t_model" ] && QA_MODEL="$_t_model"
+_t_provider="$(t_app "$TARGET" provider)";  [ -n "$_t_provider" ] && QA_PROVIDER="$_t_provider"
+_t_thinking="$(t_app "$TARGET" thinking)";  [ -n "$_t_thinking" ] && QA_THINKING="$_t_thinking"
+for _knob in flow_max:FLOW_MAX flow_attempts:FLOW_ATTEMPTS flow_steps:FLOW_STEPS; do
+  _v="$(t_app "$TARGET" "${_knob%%:*}")"
+  [ -z "$_v" ] && continue
+  case "$_v" in *[!0-9]*|0) warn "qa.app.${_knob%%:*} '$_v' is not a positive integer — using the global default";; *) eval "${_knob##*:}=\"$_v\"";; esac
+done
+
 if [ "$remote_mode" = 1 ]; then echo "engine=$engine; driving $qa_base for up to $steps steps with $QA_MODEL"; else echo "app healthy; engine=$engine; driving up to $steps steps with $QA_MODEL"; fi
 
 # Operator hooks (optional). pre_cmd GATES the run — nonzero exit aborts before the agent drives
@@ -269,7 +285,7 @@ EOF
         QA_OUT="$fdir" QA_BASE="$qa_base" QA_GOAL="$fname" QA_API_BASE="$api_base" \
         QA_MODEL="$QA_MODEL" QA_MAX_TOOLCALLS="${FLOW_STEPS:-90}" QA_HEADLESS="$QA_HEADLESS" \
         QA_LOGIN_EMAIL="$login_email" QA_LOGIN_PASSWORD="$login_pw" QA_LOGIN_PATH="$login_path" QA_START_PATH="$start_path" \
-        QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" \
+        QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" QA_SEED_STORAGE="$qa_seed_storage" \
         WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" WEB3_PK="$web3_pk" WEB3_ALLOW_FUNDED="$web3_allow_funded_flag" \
         run_to "$CMD_TIMEOUT" pi -p -nbt --no-session -e "$ext" \
           --tools browser_snapshot,browser_click,browser_type,browser_upload,browser_navigate,browser_scroll,api_request,report_bug,finish \
@@ -303,7 +319,7 @@ EOF
     QA_OUT="$qadir" QA_BASE="$qa_base" QA_SAMPLE="$sample" QA_GOAL="$goal" \
     QA_MODEL="$QA_MODEL" QA_MAX_TOOLCALLS="$((steps * 2))" QA_HEADLESS="$QA_HEADLESS" \
     QA_LOGIN_EMAIL="$login_email" QA_LOGIN_PASSWORD="$login_pw" QA_LOGIN_PATH="$login_path" QA_START_PATH="$start_path" \
-    QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" \
+    QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" QA_SEED_STORAGE="$qa_seed_storage" \
     WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" WEB3_PK="$web3_pk" WEB3_ALLOW_FUNDED="$web3_allow_funded_flag" \
     run_to "$CMD_TIMEOUT" pi -p -nbt --no-session -e "$ext" \
       --tools browser_snapshot,browser_click,browser_type,browser_upload,browser_navigate,browser_scroll,report_bug,finish \
