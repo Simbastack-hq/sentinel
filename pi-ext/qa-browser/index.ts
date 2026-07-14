@@ -128,15 +128,23 @@ async function ensurePage(): Promise<Page> {
   // Seed localStorage UX-state keys (config-driven, generic) BEFORE the first navigation so the app reads
   // them at mount — e.g. suppress a first-visit onboarding/terms modal that would otherwise block the QA
   // agent. UX-STATE ONLY (never auth/token-shaped values); "_"-prefixed keys are treated as comments.
+  // Contract: the config must be a plain object; string values are stored as-is, everything else is
+  // JSON.stringify'd (what an app's own storage layer would persist) — never "[object Object]".
   if (process.env.QA_SEED_STORAGE) {
     try {
       const seed = JSON.parse(process.env.QA_SEED_STORAGE);
-      const entries = (seed && typeof seed === "object" ? Object.entries(seed) : []).filter(([k]) => !k.startsWith("_"));
+      const isPlainObject = !!seed && typeof seed === "object" && !Array.isArray(seed);
+      const entries: [string, string][] = (isPlainObject ? Object.entries(seed) : [])
+        .filter(([k]) => !k.startsWith("_"))
+        .map(([k, v]) => [k, typeof v === "string" ? v : JSON.stringify(v)]);
       if (entries.length) {
-        await page.addInitScript((kv: [string, unknown][]) => {
-          try { for (const [k, v] of kv) window.localStorage.setItem(k, String(v)); } catch {}
+        // Per-key try/catch inside the init script: one quota/security failure must not drop the
+        // remaining keys. Seeding is attempted at document init; the trace records the attempt
+        // (init scripts can't report back), so it says "seeding", not "seeded".
+        await page.addInitScript((kv: [string, string][]) => {
+          for (const [k, v] of kv) { try { window.localStorage.setItem(k, v); } catch {} }
         }, entries);
-        trace.push({ n: 0, action: { type: "seed_storage" }, observation: `seeded localStorage keys: ${entries.map(([k]) => k).join(", ")}`, result: "", screenshot: "" });
+        trace.push({ n: 0, action: { type: "seed_storage" }, observation: `seeding ${entries.length} localStorage key(s) at document init: ${entries.map(([k]) => k).join(", ")}`, result: "", screenshot: "" });
       }
     } catch { /* malformed QA_SEED_STORAGE — skip seeding */ }
   }

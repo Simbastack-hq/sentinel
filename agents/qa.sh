@@ -89,6 +89,26 @@ if [ "$web3_enabled" = true ]; then
   [ -n "$qa_env_file" ] && [ -f "$qa_env_file" ] && web3_wl_key="$(grep -m1 '^NEXT_PUBLIC_CRYPTO_KEY=' "$qa_env_file" 2>/dev/null | cut -d= -f2-)"
 fi
 
+# Per-target model/depth overrides (fall back to the global env): lets one sentinel run a two-tier
+# fleet — a cheap frequent target and a deep nightly target with a stronger model and more
+# flows/attempts/steps. Loaded before dry-run so [dry] output reports the effective model.
+_t_model="$(t_app "$TARGET" model)";        [ -n "$_t_model" ] && QA_MODEL="$_t_model"
+_t_provider="$(t_app "$TARGET" provider)";  [ -n "$_t_provider" ] && QA_PROVIDER="$_t_provider"
+_t_thinking="$(t_app "$TARGET" thinking)";  [ -n "$_t_thinking" ] && QA_THINKING="$_t_thinking"
+# Numeric knobs fail CLOSED to the global default: digits only, length-capped (kills octal-prefix
+# and integer-overflow edge cases), base-10 normalized, and range-bound so a config typo can never
+# crash bash arithmetic or turn a run into an unbounded session.
+_num_knob(){ # raw min max fallback
+  local raw="$1" min="$2" max="$3" fb="$4" n
+  case "$raw" in ''|*[!0-9]*) warn "qa.app knob '$raw' is not a positive integer — using $fb"; echo "$fb"; return;; esac
+  if [ "${#raw}" -gt 4 ]; then warn "qa.app knob '$raw' out of range — using $fb"; echo "$fb"; return; fi
+  n=$((10#$raw))
+  if [ "$n" -ge "$min" ] && [ "$n" -le "$max" ]; then echo "$n"; else warn "qa.app knob '$raw' outside [$min,$max] — using $fb"; echo "$fb"; fi
+}
+_v="$(t_app "$TARGET" flow_max)";      [ -n "$_v" ] && FLOW_MAX="$(_num_knob "$_v" 1 20 "${FLOW_MAX:-2}")"
+_v="$(t_app "$TARGET" flow_attempts)"; [ -n "$_v" ] && FLOW_ATTEMPTS="$(_num_knob "$_v" 1 5 "${FLOW_ATTEMPTS:-2}")"
+_v="$(t_app "$TARGET" flow_steps)";    [ -n "$_v" ] && FLOW_STEPS="$(_num_knob "$_v" 10 300 "${FLOW_STEPS:-90}")"
+
 if [ "$DRY_RUN" = 1 ]; then echo "[dry] would $([ "$remote_mode" = 1 ] && echo "drive remote $qa_base" || echo "boot '$start_cmd' on 127.0.0.1:$port") for $steps steps with $QA_MODEL"; echo "# qa dry-run" > "$rd/report.md"; result skipped "dry-run" 0 "" true "$head"; exit 0; fi
 
 # Optional: boot a DIFFERENT branch in a throwaway worktree (never touches the real working tree).
@@ -184,18 +204,6 @@ fi   # end local-boot block
 # Engine: node-loop (v1, deterministic; default) or pi-native (v2, Mimo drives via pi's agent loop).
 engine="$(t_app "$TARGET" engine)"; : "${engine:=${QA_ENGINE:-node-loop}}"
 
-# Per-target model/depth overrides (fall back to the global env): lets one sentinel run a two-tier
-# fleet — a cheap frequent target and a deep nightly target with a stronger model and more
-# flows/attempts/steps. Numeric knobs fail CLOSED to the env/global default on a malformed value.
-_t_model="$(t_app "$TARGET" model)";        [ -n "$_t_model" ] && QA_MODEL="$_t_model"
-_t_provider="$(t_app "$TARGET" provider)";  [ -n "$_t_provider" ] && QA_PROVIDER="$_t_provider"
-_t_thinking="$(t_app "$TARGET" thinking)";  [ -n "$_t_thinking" ] && QA_THINKING="$_t_thinking"
-for _knob in flow_max:FLOW_MAX flow_attempts:FLOW_ATTEMPTS flow_steps:FLOW_STEPS; do
-  _v="$(t_app "$TARGET" "${_knob%%:*}")"
-  [ -z "$_v" ] && continue
-  case "$_v" in *[!0-9]*|0) warn "qa.app.${_knob%%:*} '$_v' is not a positive integer — using the global default";; *) eval "${_knob##*:}=\"$_v\"";; esac
-done
-
 if [ "$remote_mode" = 1 ]; then echo "engine=$engine; driving $qa_base for up to $steps steps with $QA_MODEL"; else echo "app healthy; engine=$engine; driving up to $steps steps with $QA_MODEL"; fi
 
 # Operator hooks (optional). pre_cmd GATES the run — nonzero exit aborts before the agent drives
@@ -246,7 +254,7 @@ Give 6-9 critical_flows, highest priority first.
 
 $digest
 EOF
-      run_to 220 node "$SENTINEL_HOME/bin/pi-ask.js" --provider "$QA_PROVIDER" --model "$QA_MODEL" --thinking medium --timeout 200 "$dprompt" > "$plan.raw" 2>>"$rd/run.log"
+      run_to 220 node "$SENTINEL_HOME/bin/pi-ask.js" --provider "$QA_PROVIDER" --model "$QA_MODEL" --thinking "$QA_THINKING" --timeout 200 "$dprompt" > "$plan.raw" 2>>"$rd/run.log"
       python3 -c "import sys,json; t=open('$plan.raw').read(); i=t.find('{'); j=t.rfind('}'); s=t[i:j+1] if (i>=0 and j>i) else '{}'; json.loads(s); open('$plan','w').write(s)" 2>>"$rd/run.log" || echo '{"critical_flows":[]}' > "$plan"
     fi
     nflows="$(jq -r '.critical_flows|length' "$plan" 2>/dev/null || echo 0)"
