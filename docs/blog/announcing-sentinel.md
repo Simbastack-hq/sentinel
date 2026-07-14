@@ -14,17 +14,26 @@ We pointed Sentinel at a working full-stack hotel PMS (a property management sys
 
 It read the code, concluded the product was a boutique and safari hotel PMS, and derived nine critical business flows on its own: the full reservation lifecycle, group bookings, the lead-to-proposal pipeline, rate management, guest self-service, mid-stay room changes, the night audit, payment through invoice to refund, and the AI copilot. Cancellations are in there too, as edge cases and backend checks inside those flows rather than a flow of their own. That's close to the list a human QA lead would write on day one, and nobody handed it to the agent.
 
+![Terminal output of a Sentinel QA run against the hotel PMS](assets/sentinel-qa-run.png)
+*The run itself: plan derived from the repo, top two flows deep-tested twice each, then the vision pass over every screen it visited.*
+
 Then it ran the top two of those flows, twice each, and the trace read like watching a person work:
 
 - It called `GET /api/availability`, got a `400`, worked out the params it was missing, and retried with `adults=2&children=0` to get a `200`.
 - It created a real reservation with `POST /api/reservations` (`201`), then fetched it back to confirm it had persisted with the right room and rate.
 - It walked the status lifecycle, found the check-in endpoint by trial (`/checkin` gave `404`, `/check-in` gave `400`, then a valid call returned `200`), and checked the folio.
 
+![The reservation folio the agent verified, with an availability error toast visible](assets/karibukit-folio.png)
+*The folio it was verifying: three room-charge nights at $178, balance due $534. The red toast in the corner is a bug being caught live: "No rooms available" on a reservation that already held its room.*
+
 The bugs it surfaced are ones a clicker structurally cannot find:
 
-- Confirming a reservation came back `NO_AVAILABILITY`, even though that same reservation already held the room. A backend state-machine bug, and the UI's Confirm button swallowed it without showing a thing.
+- Confirming a reservation came back `NO_AVAILABILITY`, even though that same reservation already held the room. A backend state-machine bug the UI turned into a misleading "no rooms available" toast on one attempt, and into no feedback at all on another.
 - The calendar showed a room as available after a booking already existed for it. The API and the UI disagreed, and only checking both layers caught it.
 - Check-in returned `200`, but the guest's `registrationStatus` stayed `NONE` on the server: a state transition that only half-completed.
+
+![The hotel PMS calendar during the run, filled with test reservations](assets/karibukit-calendar.png)
+*The calendar mid-run, filled with reservations the agent created itself, tentative and confirmed side by side.*
 
 ## How it works
 
@@ -71,6 +80,9 @@ Then we pointed it at a perpetuals exchange on Arbitrum. Its frontend, to be pre
 The boring problems arrived on schedule. The landing page fetched a backend during server rendering, so with no backend it returned a 500 and the health check never went green; we started the agent on the trading route instead. The public RPC handed back a malformed CORS header (`'*,*'`, a doubled wildcard browsers reject), the app's own on-chain reads all failed, and a seven-step run racked up 71,597 console errors and 35,797 failed requests, cost $1.16, and found zero functional bugs; we routed the app's RPC calls through Node, where CORS doesn't apply and we could retry the flaky ones. A wallet SDK with a placeholder project id threw an error that tripped the framework's full-screen dev overlay, and the overlay silently swallowed every click, so the agent declared the whole page broken; we tore the overlay down and capped the error stream so a noisy app can't bury a run again.
 
 What came out was a real report. On an unfunded burner the agent connected, opened the isolated-margin trade screen, and worked the form like a tester: the Open Position button hung outright on click (an eight-second timeout, no confirmation modal ever appearing), no order preview after entering collateral, no slippage control anywhere in the UI, no balance check (it typed 999,999 and the form shrugged), a wallet connection that silently dropped when you switched margin modes, a leverage slider showing its internal id (`slider-ex-2`) as the label, and a negative amount the validation only half-caught. Nine functional bugs and thirteen design findings in a 61-step session, for $0.28, with not one transaction ever reaching the chain.
+
+![Directory listing of one run's artifacts: a screenshot per step plus reports](assets/qa-artifacts-folder.png)
+*Every run leaves its evidence on disk: a screenshot per step, the structured report, and the vision findings.*
 
 ## The stack
 
