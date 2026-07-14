@@ -105,9 +105,14 @@ _num_knob(){ # raw min max fallback
   n=$((10#$raw))
   if [ "$n" -ge "$min" ] && [ "$n" -le "$max" ]; then echo "$n"; else warn "qa.app knob '$raw' outside [$min,$max] — using $fb"; echo "$fb"; fi
 }
-_v="$(t_app "$TARGET" flow_max)";      [ -n "$_v" ] && FLOW_MAX="$(_num_knob "$_v" 1 20 "${FLOW_MAX:-2}")"
-_v="$(t_app "$TARGET" flow_attempts)"; [ -n "$_v" ] && FLOW_ATTEMPTS="$(_num_knob "$_v" 1 5 "${FLOW_ATTEMPTS:-2}")"
-_v="$(t_app "$TARGET" flow_steps)";    [ -n "$_v" ] && FLOW_STEPS="$(_num_knob "$_v" 10 300 "${FLOW_STEPS:-90}")"
+# Normalize the GLOBAL env values first (same rules, hard fallbacks) — a typo'd sentinel.env value
+# must fail closed exactly like a typo'd per-target one — then apply the per-target overrides.
+FLOW_MAX="$(_num_knob "${FLOW_MAX:-2}" 1 20 2)"
+FLOW_ATTEMPTS="$(_num_knob "${FLOW_ATTEMPTS:-2}" 1 5 2)"
+FLOW_STEPS="$(_num_knob "${FLOW_STEPS:-90}" 10 300 90)"
+_v="$(t_app "$TARGET" flow_max)";      [ -n "$_v" ] && FLOW_MAX="$(_num_knob "$_v" 1 20 "$FLOW_MAX")"
+_v="$(t_app "$TARGET" flow_attempts)"; [ -n "$_v" ] && FLOW_ATTEMPTS="$(_num_knob "$_v" 1 5 "$FLOW_ATTEMPTS")"
+_v="$(t_app "$TARGET" flow_steps)";    [ -n "$_v" ] && FLOW_STEPS="$(_num_knob "$_v" 10 300 "$FLOW_STEPS")"
 
 if [ "$DRY_RUN" = 1 ]; then echo "[dry] would $([ "$remote_mode" = 1 ] && echo "drive remote $qa_base" || echo "boot '$start_cmd' on 127.0.0.1:$port") for $steps steps with $QA_MODEL"; echo "# qa dry-run" > "$rd/report.md"; result skipped "dry-run" 0 "" true "$head"; exit 0; fi
 

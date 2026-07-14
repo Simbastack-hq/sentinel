@@ -142,7 +142,12 @@ async function ensurePage(): Promise<Page> {
         // remaining keys. Seeding is attempted at document init; the trace records the attempt
         // (init scripts can't report back), so it says "seeding", not "seeded".
         await page.addInitScript((kv: [string, string][]) => {
-          for (const [k, v] of kv) { try { window.localStorage.setItem(k, v); } catch {} }
+          for (const [k, v] of kv) {
+            try { window.localStorage.setItem(k, v); }
+            // console.error is the one channel the driver already captures into the report's
+            // consoleErrors — a quota/security failure surfaces there instead of vanishing.
+            catch (e) { try { console.error(`sentinel seed_local_storage failed for "${k}": ${e}`); } catch {} }
+          }
         }, entries);
         trace.push({ n: 0, action: { type: "seed_storage" }, observation: `seeding ${entries.length} localStorage key(s) at document init: ${entries.map(([k]) => k).join(", ")}`, result: "", screenshot: "" });
       }
