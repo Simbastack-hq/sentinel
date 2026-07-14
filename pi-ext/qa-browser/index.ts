@@ -165,6 +165,10 @@ async function ensurePage(): Promise<Page> {
         // remaining keys. Seeding is attempted at document init; the trace records the attempt
         // (init scripts can't report back), so it says "seeding", not "seeded".
         await page.addInitScript((kv: [string, string][]) => {
+          // Only seed the TOP frame (the app's own origin). addInitScript runs in EVERY frame, and
+          // writing localStorage in a cross-origin subframe (e.g. an embedded auth iframe) throws a
+          // SecurityError that would console.error and be mis-reported as an app bug.
+          if (window.top !== window.self) return;
           for (const [k, v] of kv) {
             try { window.localStorage.setItem(k, v); }
             // console.error is the one channel the driver already captures into the report's
