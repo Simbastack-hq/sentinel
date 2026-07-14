@@ -65,6 +65,29 @@ function SNAP() {
     if (seen.has(el)) return;
     if (getComputedStyle(el as HTMLElement).cursor === "pointer" && isVisible(el)) { seen.add(el); cand.push(el); }
   });
+  // Modal-aware ordering: when a modal/dialog/overlay is open, index ITS interactive elements FIRST. A user
+  // can only act on the modal anyway, and a portal-rendered modal lands at the END of the DOM — so on a dense
+  // page (40+ controls) its options would fall past the index cap and be invisible to the agent (why wallet
+  // pickers / onboarding modals looked like "nothing happened").
+  const modalRoot: Element | null = (() => {
+    const dlg = Array.from(document.querySelectorAll('[role="dialog"],[aria-modal="true"]')).filter(isVisible);
+    if (dlg.length) return dlg[dlg.length - 1];
+    let best: Element | null = null, bestZ = 9; // ignore low-z fixed chrome (headers/footers)
+    document.querySelectorAll("*").forEach((el) => {
+      const st = getComputedStyle(el as HTMLElement);
+      if (st.position !== "fixed" || !isVisible(el)) return;
+      const r = (el as HTMLElement).getBoundingClientRect();
+      if (r.width < window.innerWidth * 0.3 || r.height < window.innerHeight * 0.3) return;
+      const z = parseInt(st.zIndex || "0", 10) || 0;
+      if (z > bestZ) { best = el; bestZ = z; }
+    });
+    return best;
+  })();
+  if (modalRoot) {
+    const inModal: Element[] = [], rest: Element[] = [];
+    for (const el of cand) (modalRoot.contains(el) ? inModal : rest).push(el);
+    cand.length = 0; cand.push(...inModal, ...rest);
+  }
   const out: any[] = []; let i = 0;
   for (const el of cand) {
     if (i >= 40) break;
@@ -282,8 +305,23 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, params: any) {
       const p = await ensurePage(); if (calls >= MAX_CALLS) return overBudgetMsg(); calls++;
       let result: string;
-      try { await p.click(`[data-qa-idx="${params.index}"]`, { timeout: 8000 }); result = "clicked #" + params.index; }
-      catch (e: any) { result = "click failed: " + String(e?.message || e).split("\n")[0].slice(0, 160); }
+      const sel = `[data-qa-idx="${params.index}"]`;
+      try { await p.click(sel, { timeout: 6000 }); result = "clicked #" + params.index; }
+      catch {
+        // Retry ladder for animated / portaled / pointer-intercepted elements (modals, wallet pickers):
+        // scroll+settle, then keyboard actuation, then a LOGGED force-click so a genuinely-obscured element
+        // still surfaces as a finding instead of silently passing.
+        try { await p.locator(sel).scrollIntoViewIfNeeded({ timeout: 1500 }); } catch {}
+        await p.waitForTimeout(400);
+        try { await p.click(sel, { timeout: 4000 }); result = "clicked #" + params.index + " (after scroll+settle)"; }
+        catch {
+          try { await p.locator(sel).focus({ timeout: 1500 }); await p.keyboard.press("Enter"); result = "activated #" + params.index + " via keyboard (pointer click was intercepted)"; }
+          catch {
+            try { await p.click(sel, { force: true, timeout: 3000 }); result = "FORCE-clicked #" + params.index + " — normal/scroll/keyboard clicks all failed, so this element is likely obscured or non-interactive (treat as a possible UX defect)"; }
+            catch (e: any) { result = "click failed after retries: " + String(e?.message || e).split("\n")[0].slice(0, 160); }
+          }
+        }
+      }
       await p.waitForTimeout(800);
       trace.push({ n: calls, action: { type: "click", index: params.index }, observation: "", result });
       return text(result + drainErrors() + budgetNote());
