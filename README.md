@@ -2,6 +2,8 @@
 
 **24/7 specialized AI agents that watch your repos and apps and do one job well, unattended.**
 
+**Launch post:** [Sentinel: an open-source QA agent that reads your code before it clicks anything](https://blog.simbastack.com/announcing-sentinel/)
+
 Sentinel runs four kinds of agents on a schedule:
 
 | Agent | What it does | Writes? |
