@@ -10,7 +10,7 @@ A QA engineer worth hiring doesn't click around. They learn the product first, t
 
 ## What happened when we gave it a real app and no instructions
 
-We pointed Sentinel at a working full-stack hotel PMS (a property management system): a Next.js frontend, a separate API service, a Postgres database. The PMS is KaribuKit, our own product, which is why we could hand an agent admin credentials for a throwaway test tenant full of disposable data. That's also all it got — the repo and those credentials. No test plan, no list of flows.
+We pointed Sentinel at a working full-stack hotel PMS (a property management system): a Next.js frontend, a separate API service, a Postgres database. The PMS is KaribuKit, our own product, which is why we could hand an agent admin credentials for a disposable test tenant. That's also all it got — the repo and those credentials. No test plan, no list of flows.
 
 It read the code, concluded the product was a boutique and safari hotel PMS, and derived nine critical business flows on its own: the full reservation lifecycle, group bookings, the lead-to-proposal pipeline, rate management, guest self-service, mid-stay room changes, the night audit, payment through invoice to refund, and the AI copilot. Cancellations are in there too, though this run folded them in as edge cases and backend checks inside the other flows rather than deriving a standalone flow. That's close to the list a human QA lead would write on day one, and nobody handed it to the agent.
 
@@ -91,7 +91,16 @@ Then we pointed it at a perpetuals exchange on Arbitrum. Its frontend, to be pre
 
 The boring problems arrived on schedule. The landing page fetched a backend during server rendering, so with no backend it returned a 500 and the health check never went green; we started the agent on the trading route instead. The public RPC handed back a malformed CORS header (`'*,*'`, a doubled wildcard browsers reject), and the app's own on-chain reads all failed. A seven-step run racked up 71,597 console errors and 35,797 failed requests, cost $1.16, and found zero functional bugs. We routed the app's RPC calls through Node, where CORS doesn't apply and we could retry the flaky ones. A wallet SDK with a placeholder project id threw an error that tripped the framework's full-screen dev overlay, and the overlay silently swallowed every click, so the agent declared the whole page broken; we tore the overlay down and capped the error stream so a noisy app can't bury a run again.
 
-What came out was a real report. On an unfunded burner the agent connected, opened the isolated-margin trade screen, and worked the form like a tester. The Open Position button hung outright on click, an eight-second timeout with no confirmation modal ever appearing. Behind it: no order preview after entering collateral, no slippage control anywhere in the UI, no balance check (it typed 999,999 and the form shrugged), a wallet connection that silently dropped when you switched margin modes, a leverage slider showing its internal id (`slider-ex-2`) as the label, and a negative amount the validation only half-caught. Nine functional bugs and thirteen design findings in a 61-step session, for $0.28, with not one transaction ever reaching the chain.
+What came out was a real report. On an unfunded burner the agent connected, opened the isolated-margin trade screen, and worked the form like a tester:
+
+- The Open Position button hung outright on click (an eight-second timeout, no confirmation modal ever appearing).
+- No order preview after entering collateral, no slippage control anywhere in the UI.
+- No balance check: it typed 999,999 and the form shrugged.
+- A wallet connection that silently dropped when you switched margin modes.
+- A leverage slider showing its internal id (`slider-ex-2`) as the label.
+- A negative amount the validation only half-caught.
+
+Nine functional bugs and thirteen design findings in a 61-step session, for $0.28, with not one transaction ever reaching the chain.
 
 ![Directory listing of one run's artifacts: a screenshot per step plus reports](assets/qa-artifacts-folder.png)
 *Every run leaves its evidence on disk: a screenshot per step, the structured report, and the vision findings.*
@@ -102,7 +111,10 @@ Sentinel is deliberately boring to operate — about 2,500 lines of bash, Node, 
 
 ## What it can't do yet
 
-Exploration still varies run to run, which is why every flow runs more than once. Booting a complex stack takes the right config (ports, auth, a test database), and you should never point write-capable QA at production data. Depth trades off against time and cost, all of it knobs: flows per run, attempts per flow, steps per attempt. For wallet apps it drives an unfunded burner, so it tests everything up to the moment of settlement, not a trade actually filling; a local `anvil` fork (Foundry's local Ethereum node) gives it real chain state to quote and simulate against, but the broadcast block stays on even there. Actually filling a trade on a fork is a thing we haven't built.
+- Exploration still varies run to run; that's why every flow runs more than once.
+- Booting a complex stack takes the right config (ports, auth, a test database), and you should never point write-capable QA at production data.
+- Depth trades off against time and cost, all of it knobs: flows per run, attempts per flow, steps per attempt.
+- For wallet apps it drives an unfunded burner, so it tests everything up to the moment of settlement, not a trade actually filling. A local `anvil` fork (Foundry's local Ethereum node) gives it real chain state to quote against, but the broadcast block stays on even there. Actually filling a trade on a fork is a thing we haven't built.
 
 ## Try it
 
@@ -120,4 +132,4 @@ The one hard prerequisite is the `pi` CLI with a provider configured; Mimo, auth
 
 Point it at something real and see what it finds. PRs and issues welcome.
 
-— [Hemanshu](https://github.com/Hemanshu-Upadhyay), building [Sentinel](https://github.com/Simbastack-hq/sentinel) and [KaribuKit](https://karibukit.com) at [SimbaStack](https://simbastack.com)
+— Hemanshu, building [Sentinel](https://github.com/Simbastack-hq/sentinel) and [KaribuKit](https://karibukit.com) at [SimbaStack](https://simbastack.com)
