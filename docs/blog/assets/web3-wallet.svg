@@ -1,0 +1,70 @@
+<svg viewBox="0 0 880 360" width="880" height="360" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#57606a"/>
+    </marker>
+    <marker id="arrg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#1a7f37"/>
+    </marker>
+    <marker id="arrr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 1 L 9 5 L 0 9 z" fill="#cf222e"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="880" height="360" fill="#ffffff"/>
+
+  <!-- Browser page -->
+  <rect x="30" y="40" width="300" height="210" rx="8" fill="none" stroke="#8c959f" stroke-width="1.5"/>
+  <text x="46" y="66" font-size="13" font-weight="600" fill="#57606a">the browser page</text>
+
+  <rect x="50" y="80" width="260" height="62" rx="6" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <text x="180" y="104" text-anchor="middle" font-size="14" font-weight="600" fill="#1f2328">the dApp</text>
+  <text x="180" y="123" text-anchor="middle" font-size="12" fill="#57606a">connects, signs, reads — sees an</text>
+  <text x="180" y="137" text-anchor="middle" font-size="12" fill="#57606a">ordinary wallet</text>
+
+  <line x1="180" y1="142" x2="180" y2="168" stroke="#57606a" stroke-width="1.5" marker-start="url(#arr2)" marker-end="url(#arr2)"/>
+
+  <rect x="50" y="172" width="260" height="58" rx="6" fill="#ddf4ff" stroke="#54aeff" stroke-width="1.5"/>
+  <text x="180" y="195" text-anchor="middle" font-size="14" font-weight="600" fill="#1f2328">injected provider</text>
+  <text x="180" y="214" text-anchor="middle" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#57606a">window.ethereum / EIP-6963</text>
+
+  <!-- Sentinel node process -->
+  <rect x="430" y="40" width="250" height="210" rx="8" fill="none" stroke="#8c959f" stroke-width="1.5"/>
+  <text x="446" y="66" font-size="13" font-weight="600" fill="#57606a">Sentinel — the Node process</text>
+
+  <rect x="450" y="80" width="210" height="62" rx="6" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <text x="555" y="104" text-anchor="middle" font-size="14" font-weight="600" fill="#1f2328">burner key</text>
+  <text x="555" y="123" text-anchor="middle" font-size="12" fill="#57606a">fresh, unfunded — never</text>
+  <text x="555" y="137" text-anchor="middle" font-size="12" fill="#57606a">enters the page</text>
+
+  <rect x="450" y="172" width="210" height="58" rx="6" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <text x="555" y="195" text-anchor="middle" font-size="14" font-weight="600" fill="#1f2328">method filter</text>
+  <text x="555" y="214" text-anchor="middle" font-size="12" fill="#57606a">explicit read-only allow-list</text>
+
+  <!-- injection arrow -->
+  <path d="M 430 155 L 310 155 L 310 172" fill="none" stroke="#54aeff" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#arr2)"/>
+  <text x="372" y="133" text-anchor="middle" font-size="12" fill="#57606a">injected before</text>
+  <text x="372" y="148" text-anchor="middle" font-size="12" fill="#57606a">the page loads</text>
+
+  <!-- every call arrow -->
+  <path d="M 310 201 L 446 201" fill="none" stroke="#57606a" stroke-width="1.5" marker-end="url(#arr2)"/>
+  <text x="378" y="193" text-anchor="middle" font-size="12" fill="#57606a">every call</text>
+
+  <!-- reads allowed -->
+  <path d="M 660 190 L 745 190 L 745 116 L 756 116" fill="none" stroke="#1a7f37" stroke-width="1.5" marker-end="url(#arrg)"/>
+  <text x="758" y="164" font-size="12" fill="#1a7f37">reads pass ✓</text>
+  <text x="758" y="180" font-size="12" fill="#1a7f37">eth_call, balances…</text>
+
+  <rect x="760" y="88" width="90" height="56" rx="6" fill="#f6f8fa" stroke="#d0d7de" stroke-width="1.5"/>
+  <text x="805" y="112" text-anchor="middle" font-size="14" font-weight="600" fill="#1f2328">RPC /</text>
+  <text x="805" y="130" text-anchor="middle" font-size="14" font-weight="600" fill="#1f2328">the chain</text>
+
+  <!-- broadcasts blocked -->
+  <path d="M 555 230 L 555 282" fill="none" stroke="#cf222e" stroke-width="1.5" marker-end="url(#arrr)"/>
+  <rect x="400" y="286" width="310" height="42" rx="6" fill="#ffffff" stroke="#cf222e" stroke-width="1.5"/>
+  <text x="555" y="304" text-anchor="middle" font-size="13" font-weight="600" fill="#cf222e">anything that broadcasts is refused ✗</text>
+  <text x="555" y="320" text-anchor="middle" font-size="12" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" fill="#cf222e">eth_sendTransaction &amp; friends — never forwarded</text>
+
+  <!-- footnote -->
+  <text x="30" y="346" font-size="12" fill="#57606a">Preflight, fail-closed: a key that has ever been funded or used aborts the run.</text>
+</svg>
