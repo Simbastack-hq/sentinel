@@ -1,4 +1,4 @@
-# Most "AI QA" is just a clicker. We built one that reads your code first.
+# Sentinel: an open-source QA agent that reads your code before it clicks anything
 
 *Sentinel reads the codebase, works out the real business flows, and tests them end to end across the frontend and the backend. It's open source under MIT.*
 
