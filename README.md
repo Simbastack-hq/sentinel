@@ -199,7 +199,7 @@ For apps gated behind MetaMask/Rabby, `qa.app.web3` injects a programmatic walle
 
 ⚠️ `allow_funded` only relaxes the unfunded preflight — **broadcasts are still blocked** (Sentinel never sends an on-chain tx). A real *fill* can still happen if the app submits trades through its **own backend** (signed action / API), so treat this as live trading: use a **small, capped, dedicated** wallet, keep leverage minimal, and make the flow `goal` close what it opens. The key is referenced by env-var name (value in the gitignored `config/sentinel.env`) and never enters the page, model, trace, or logs.
 
-Proven against a live wallet-gated perpetuals exchange frontend on Arbitrum: from an unfunded burner the agent connected, opened the trade screen, and surfaced **9 functional bugs + 13 UI/UX findings** in a 61-step session for ~$0.28 — with **no transaction ever broadcast**.
+Proven against a live wallet-gated perpetuals exchange frontend: from an unfunded burner the agent connected, opened the trade screen, and surfaced **9 functional bugs + 13 UI/UX findings** in a 61-step session for ~$0.28 — with **no transaction ever broadcast**.
 
 Credentials referenced by `email_env`/`password_env` live only in `config/sentinel.env` (gitignored), keyed by the **name** you put in `targets.json`.
 
