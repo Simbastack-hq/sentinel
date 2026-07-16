@@ -16,6 +16,10 @@ const OUT = process.env.QA_OUT || "/tmp/qa-pi";
 const BASE = process.env.QA_BASE || "http://127.0.0.1:3009";
 const SAMPLE = process.env.QA_SAMPLE || "";
 const MAX_CALLS = parseInt(process.env.QA_MAX_TOOLCALLS || "30", 10);
+// How many interactive elements SNAP indexes per snapshot. Dense apps put real controls past the
+// default cap — e.g. a trading page whose "Close position" button sits below 40 other controls is
+// invisible to the agent, so it can never close what it opened. Raise per-target via app.snap_max.
+const SNAP_MAX = Math.max(10, parseInt(process.env.QA_SNAP_MAX || "40", 10) || 40);
 const HEADLESS = process.env.QA_HEADLESS !== "0";
 // Optional login. Credentials come from env (set by qa.sh from config/sentinel.env); used ONLY to fill the
 // form via Playwright — never sent to the model, never written to the trace/report/logs.
@@ -50,7 +54,7 @@ let capturedAuth = ""; // the real Authorization header the frontend sends to it
 
 // Tag visible interactive elements (+ always file inputs) and return an indexed list.
 // Mirrors v1 bin/qa-drive.js SNAP. Runs in the browser context.
-function SNAP() {
+function SNAP(maxEls: number) {
   document.querySelectorAll("[data-qa-idx]").forEach((e) => e.removeAttribute("data-qa-idx"));
   const baseSel = 'a,button,input,select,textarea,label,[role=button],[role=link],[role=tab],[onclick],[contenteditable="true"],[tabindex],[draggable="true"]';
   const isVisible = (el: Element) => {
@@ -67,7 +71,7 @@ function SNAP() {
   });
   // Modal-aware ordering: when a modal/dialog/overlay is open, index ITS interactive elements FIRST. A user
   // can only act on the modal anyway, and a portal-rendered modal lands at the END of the DOM — so on a dense
-  // page (40+ controls) its options would fall past the index cap and be invisible to the agent (why wallet
+  // page (more controls than the index cap) its options would fall past it and be invisible to the agent (why wallet
   // pickers / onboarding modals looked like "nothing happened").
   const modalRoot: Element | null = (() => {
     const dlg = Array.from(document.querySelectorAll('[role="dialog"],[aria-modal="true"]')).filter(isVisible);
@@ -90,7 +94,7 @@ function SNAP() {
   }
   const out: any[] = []; let i = 0;
   for (const el of cand) {
-    if (i >= 40) break;
+    if (i >= maxEls) break;
     const isFile = el.tagName === "INPUT" && ((el.getAttribute("type") || "").toLowerCase() === "file");
     if (!isFile && !isVisible(el)) continue;
     el.setAttribute("data-qa-idx", String(i));
@@ -289,7 +293,7 @@ export default function (pi: ExtensionAPI) {
     async execute() {
       const p = await ensurePage(); if (calls >= MAX_CALLS) return overBudgetMsg(); calls++;
       let els: any[] = [];
-      try { els = await p.evaluate(SNAP); } catch (e: any) { return text("page unavailable: " + String(e?.message || e).split("\n")[0].slice(0, 160) + " — call finish now with your verdict."); }
+      try { els = await p.evaluate(SNAP, SNAP_MAX); } catch (e: any) { return text("page unavailable: " + String(e?.message || e).split("\n")[0].slice(0, 160) + " — call finish now with your verdict."); }
       const url = p.url(); let title = ""; try { title = await p.title(); } catch {}
       if (loginAttempted && !loginOk && url.includes(LOGIN_PATH)) {
         return text(`AUTO-LOGIN FAILED — you are on the login page and you do NOT have credentials to log in yourself. Do NOT fill or submit the login form. Call \`finish\` now with verdict "fail" and summary "automated login failed".`);

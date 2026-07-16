@@ -68,6 +68,9 @@ start_path="$(t_app "$TARGET" start_path)"   # path the agent opens first (defau
 # Seed localStorage UX-state (config-driven, generic): e.g. skip a first-visit onboarding/terms modal that
 # would block the agent. UX-STATE ONLY — never auth/token keys. Keys/values (+ a "_comment") in targets.json.
 qa_seed_storage="$(jq -c --arg t "$TARGET" '.targets[$t].agents.qa.app.seed_local_storage // {}' "$TARGETS_JSON" 2>/dev/null)"
+# How many interactive elements each snapshot indexes. Dense apps hide real controls past the default
+# cap (40), leaving the agent unable to see — let alone click — them. Empty = qa-browser's default.
+qa_snap_max="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.snap_max // empty' "$TARGETS_JSON" 2>/dev/null)"
 # Web3 dApp mode (optional): inject an UNFUNDED burner wallet + gate stubs (see pi-ext/qa-browser/web3.ts).
 # The wallet key never enters the page/model/logs; transactions are never broadcast — no real funds can move.
 web3_enabled="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.enabled // false' "$TARGETS_JSON" 2>/dev/null)"
@@ -299,6 +302,7 @@ EOF
         QA_MODEL="$QA_MODEL" QA_MAX_TOOLCALLS="${FLOW_STEPS:-90}" QA_HEADLESS="$QA_HEADLESS" \
         QA_LOGIN_EMAIL="$login_email" QA_LOGIN_PASSWORD="$login_pw" QA_LOGIN_PATH="$login_path" QA_START_PATH="$start_path" \
         QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" QA_SEED_STORAGE="$qa_seed_storage" \
+        QA_SNAP_MAX="$qa_snap_max" \
         WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" WEB3_PK="$web3_pk" WEB3_ALLOW_FUNDED="$web3_allow_funded_flag" \
         run_to "$CMD_TIMEOUT" pi -p -nbt --no-session -e "$ext" \
           --tools browser_snapshot,browser_click,browser_type,browser_upload,browser_navigate,browser_scroll,api_request,report_bug,finish \
@@ -333,6 +337,7 @@ EOF
     QA_MODEL="$QA_MODEL" QA_MAX_TOOLCALLS="$((steps * 2))" QA_HEADLESS="$QA_HEADLESS" \
     QA_LOGIN_EMAIL="$login_email" QA_LOGIN_PASSWORD="$login_pw" QA_LOGIN_PATH="$login_path" QA_START_PATH="$start_path" \
     QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" QA_SEED_STORAGE="$qa_seed_storage" \
+    QA_SNAP_MAX="$qa_snap_max" \
     WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" WEB3_PK="$web3_pk" WEB3_ALLOW_FUNDED="$web3_allow_funded_flag" \
     run_to "$CMD_TIMEOUT" pi -p -nbt --no-session -e "$ext" \
       --tools browser_snapshot,browser_click,browser_type,browser_upload,browser_navigate,browser_scroll,report_bug,finish \
