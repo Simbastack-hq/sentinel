@@ -120,4 +120,4 @@ The one hard prerequisite is the `pi` CLI with a provider configured; Mimo, auth
 
 Point it at something real and see what it finds. PRs and issues welcome.
 
-— Hemanshu, building Sentinel and KaribuKit at [SimbaStack](https://simbastack.com)
+— [Hemanshu](https://github.com/Hemanshu-Upadhyay), building [Sentinel](https://github.com/Simbastack-hq/sentinel) and [KaribuKit](https://karibukit.com) at [SimbaStack](https://simbastack.com)
