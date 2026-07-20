@@ -430,6 +430,10 @@ if [ -n "$issues_repo" ] && [ "$bugs" -gt 0 ] 2>/dev/null; then
   issues_max="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.issues.max_per_run // 5' "$TARGETS_JSON" 2>/dev/null)"
   # Flood cap must fail CLOSED: a malformed max_per_run falls back to the default, never to "unlimited".
   case "$issues_max" in ''|*[!0-9]*) echo "warn: qa.issues.max_per_run '$issues_max' is not a number — using 5"; issues_max=5;; esac
+  # Optional GitHub label applied to every filed issue, so automated bugs are one-click filterable
+  # (e.g. "sentinel-qa"). The label MUST already exist in the repo or `gh issue create --label` errors.
+  issues_label="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.issues.label // ""' "$TARGETS_JSON" 2>/dev/null)"
+  label_args=(); [ -n "$issues_label" ] && label_args=(--label "$issues_label")
   sev_rank(){ case "$1" in critical) echo 3;; high) echo 2;; medium) echo 1;; *) echo 0;; esac; }
   hash_stdin(){ if have sha256sum; then sha256sum; else shasum -a 256; fi; }
   min_rank="$(sev_rank "$issues_min")"
@@ -456,7 +460,7 @@ if [ -n "$issues_repo" ] && [ "$bugs" -gt 0 ] 2>/dev/null; then
 $desc
 
 _run \`${RUN_ID:-?}\` • verdict $v • $(date -u '+%Y-%m-%d %H:%MZ')_"
-    if url="$(gh issue create --repo "$issues_repo" --title "$title" --body "$body" 2>>"$rd/run.log")"; then
+    if url="$(gh issue create --repo "$issues_repo" --title "$title" --body "$body" "${label_args[@]}" 2>>"$rd/run.log")"; then
       tmp="$(mktemp)"; jq --arg k "$key" --arg u "$url" '.[$k]=$u' "$seen_f" > "$tmp" && mv "$tmp" "$seen_f"
       issue_urls="$(jq -c --arg u "$url" '. + [$u]' <<<"$issue_urls")"
       filed=$((filed+1))
