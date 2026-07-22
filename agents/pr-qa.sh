@@ -40,7 +40,11 @@ gh auth status >/dev/null 2>&1 || { echo "# pr-qa — gh not authenticated" > "$
 # both claim the same comment. A per-target lock serializes them; a second run skips cleanly.
 prqa_lock="pr-qa-$TARGET"
 lock_acquire "$prqa_lock" || { echo "# pr-qa — another pr-qa run for $TARGET is in progress" > "$rd/report.md"; result skipped "another pr-qa run in progress" 0 "" true "$head"; exit 0; }
-trap 'lock_release "$prqa_lock"' EXIT INT TERM
+# EXIT fires once at the end (normal or via the signal handlers, which exit). Ownership-checked
+# release means even a stray double-fire can't drop another run's lock.
+trap 'lock_release "$prqa_lock"' EXIT
+trap 'lock_release "$prqa_lock"; exit 143' TERM
+trap 'lock_release "$prqa_lock"; exit 130' INT
 
 today="$(date +%F)"
 processed=0; total_bugs=0; notes=""
@@ -68,17 +72,24 @@ preview_url_ok(){ # url -> 0 ok / 1 reject (reason on stderr)
   host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
   case "$host" in
     ''|localhost|*.localhost|*.local|*.internal) echo "local host" >&2; return 1;; esac
-  # IPv4 literal → block loopback/private/link-local/metadata ranges.
+  case "$host" in *[!a-z0-9.-]*) echo "invalid host chars" >&2; return 1;; esac
+  # Reject bare-integer / hex / octal IP encodings (2130706433, 0x7f000001, 017700000001) and any
+  # single-label host: a real preview host is a dotted FQDN, and a dotted-quad is range-checked
+  # below. Anything with no dot can't be canonicalized by a string check, so refuse it.
+  case "$host" in *.*) : ;; *) echo "single-label / numeric host — refused" >&2; return 1;; esac
+  # IPv4 literal → block loopback/private/link-local/CGNAT/metadata ranges.
   case "$host" in
     127.*|10.*|192.168.*|169.254.*|0.*|100.6[4-9].*|100.[7-9][0-9].*|100.1[0-1][0-9].*|100.12[0-7].*) echo "private/loopback ip" >&2; return 1;;
     172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) echo "private ip" >&2; return 1;;
   esac
-  case "$host" in *:*) echo "ipv6 literal not allowed" >&2; return 1;; esac   # dodge ::1 / fc00::/fe80:: entirely
-  if [ -n "$allow_suffixes" ]; then
-    local s ok=1
-    for s in $allow_suffixes; do case "$host" in *"$s") ok=0; break;; esac; done
-    [ "$ok" = 0 ] || { echo "host not in preview_url_allow" >&2; return 1; }
-  fi
+  # preview_url_allow (host-suffix allowlist) is REQUIRED — pr-qa only ever drives an explicit set
+  # of known public preview domains. Empty ⇒ refuse everything (fail closed). This is the primary
+  # containment; the range checks above are defense-in-depth. (DNS rebinding of an allowlisted host
+  # and browser redirect-following are network-layer residuals — see DESIGN §5d.)
+  [ -n "$allow_suffixes" ] || { echo "preview_url_allow is not set (required for pr-qa)" >&2; return 1; }
+  local s ok=1
+  for s in $allow_suffixes; do case "$host" in *"$s") ok=0; break;; esac; done
+  [ "$ok" = 0 ] || { echo "host not in preview_url_allow" >&2; return 1; }
   return 0
 }
 
@@ -161,15 +172,17 @@ while [ "$i" -lt "$pr_count" ] && [ "$processed" -lt "$max_prs" ]; do
 - PR #$n: no valid preview URL"
     continue
   fi
-  # Reachability probe: --max-redirs 0 so a redirect off the validated origin can't smuggle the
-  # probe to an internal target (the browser's own redirect-following is bounded by preview_url_allow
-  # + running the QA host without privileged internal network reach — see docs).
-  if ! curl -fsS --max-time 15 --max-redirs 0 -o /dev/null "$preview"; then
-    gh pr comment "$n" --repo "$repo" --body "**sentinel-qa:** preview \`$preview\` isn't answering (or redirects off-origin) — skipping. Re-comment \`$command_word\` once the deployment is up." >/dev/null 2>&1 || true
-    notes="$notes
-- PR #$n: preview unreachable"
-    continue
-  fi
+  # Reachability probe. -f alone treats a 3xx as success, so read the status explicitly and treat a
+  # redirect as "not cleanly reachable" (a redirect off the validated origin is exactly what we
+  # don't want to hand the browser). 2xx only.
+  http_code="$(curl -s --max-time 15 --max-redirs 0 -o /dev/null -w '%{http_code}' "$preview" 2>/dev/null || echo 000)"
+  case "$http_code" in
+    2*) : ;;
+    *) gh pr comment "$n" --repo "$repo" --body "**sentinel-qa:** preview \`$preview\` returned \`$http_code\` (not a clean 2xx — a redirect or error) — skipping. Re-comment \`$command_word\` once the deployment serves the preview directly." >/dev/null 2>&1 || true
+       notes="$notes
+- PR #$n: preview not 2xx ($http_code)"
+       continue;;
+  esac
 
   # About to actually run → consume a daily slot (dedup already claimed above). Fail CLOSED: if the
   # quota can't be recorded, skip rather than run un-counted.

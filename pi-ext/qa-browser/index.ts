@@ -434,7 +434,9 @@ export default function (pi: ExtensionAPI) {
           }
           const headers: any = { "Content-Type": "application/json" };
           if (authHeader) headers["Authorization"] = authHeader;
-          const r = await fetch(url, { method, headers, body, credentials: "include" });
+          // In read-only PR mode don't FOLLOW redirects: a preview-origin GET that 302s to an
+          // internal host would otherwise be chased by fetch, escaping the origin confinement.
+          const r = await fetch(url, { method, headers, body, credentials: "include", redirect: readOnly ? "manual" : "follow" });
           const t = await r.text();
           return { status: r.status, body: t.slice(0, 2500) };
         }, { url, method, body, auth: capturedAuth, storageKey: AUTH_STORAGE_KEY, allowAuth });

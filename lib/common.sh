@@ -138,6 +138,8 @@ lock_acquire(){ # name -> 0 if acquired
   if [ -n "$lpid" ] && kill -0 "$lpid" 2>/dev/null && [ "$age" -lt "$maxage" ]; then return 1; fi
   rm -rf "$d"; mkdir "$d" 2>/dev/null && { echo $$ > "$d/pid"; date +%s > "$d/epoch"; return 0; }; return 1
 }
-lock_release(){ rm -rf "$LOCKS/$1.lock"; }
+# Only the process that owns the lock may release it — otherwise a signal-trap release from one
+# run could delete a lock a second run legitimately holds (breaking single-flight).
+lock_release(){ local d="$LOCKS/$1.lock"; [ "$(cat "$d/pid" 2>/dev/null)" = "$$" ] && rm -rf "$d"; return 0; }
 
 mask(){ sed -E 's/(TOKEN|TOPIC|KEY|SECRET|PASSWORD)=[^ ]*/\1=***/g'; }
