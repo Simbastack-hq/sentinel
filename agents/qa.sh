@@ -319,7 +319,7 @@ EOF
         QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" QA_SEED_STORAGE="$qa_seed_storage" QA_API_READONLY="${PRQA:-}" \
         QA_SNAP_MAX="$qa_snap_max" \
         WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" WEB3_PK="$web3_pk" WEB3_ALLOW_FUNDED="$web3_allow_funded_flag" \
-        run_to "$CMD_TIMEOUT" pi -p -nbt --no-session -e "$ext" \
+        run_to "$CMD_TIMEOUT" ${QA_NET_GROUP:+"$SENTINEL_HOME/bin/qa-net-jail" "$QA_NET_GROUP"} pi -p -nbt --no-session -e "$ext" \
           --tools browser_snapshot,browser_click,browser_type,browser_upload,browser_navigate,browser_scroll,api_request,report_bug,finish \
           --provider "$QA_PROVIDER" --model "$QA_MODEL" --thinking "$QA_THINKING" --mode json \
           "$fprompt" > "$fdir/pi.jsonl" 2>>"$rd/run.log" || echo "warn: flow $i attempt $a nonzero exit"
@@ -354,7 +354,7 @@ EOF
     QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" QA_SEED_STORAGE="$qa_seed_storage" QA_API_READONLY="${PRQA:-}" \
     QA_SNAP_MAX="$qa_snap_max" \
     WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" WEB3_PK="$web3_pk" WEB3_ALLOW_FUNDED="$web3_allow_funded_flag" \
-    run_to "$CMD_TIMEOUT" pi -p -nbt --no-session -e "$ext" \
+    run_to "$CMD_TIMEOUT" ${QA_NET_GROUP:+"$SENTINEL_HOME/bin/qa-net-jail" "$QA_NET_GROUP"} pi -p -nbt --no-session -e "$ext" \
       --tools browser_snapshot,browser_click,browser_type,browser_upload,browser_navigate,browser_scroll,report_bug,finish \
       --provider "$QA_PROVIDER" --model "$QA_MODEL" --thinking "$QA_THINKING" --mode json \
       "$qprompt" > "$pilog" 2>>"$rd/run.log" || echo "warn: pi-native nonzero exit"

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Run a command under a dedicated group so nftables egress rules (skgid match) apply to it
+# and every child — i.e. the Playwright browser can't reach private/loopback/metadata hosts.
+# Fail closed: a missing group errors the run rather than silently running unjailed.
+# usage: qa-net-jail <group> <cmd> [args...]
+set -euo pipefail
+grp="$1"; shift
+getent group "$grp" >/dev/null || { echo "qa-net-jail: group '$grp' missing — run qa-egress-lockdown.sh first" >&2; exit 1; }
+exec sg "$grp" -c "$(printf '%q ' "$@")"
