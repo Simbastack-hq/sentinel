@@ -123,6 +123,24 @@ agents/qa.sh                          pi-ext/qa-browser/web3.ts (installWeb3)
 
 This tests the full wallet-gated frontend (connect → trade form → quotes/validation → the approve/open path) end to end; on-chain submission hits the unfunded wall (`insufficient funds`), which the goal tells the agent is **expected**, so it focuses on rendering/quote/validation/state bugs. For real on-chain *execution* without real money, point `web3.rpc` at a local `anvil --fork-url` of the chain (the deny-list still blocks accidental mainnet broadcast).
 
+## 5d. pr-qa — on-demand QA from a PR comment
+
+Test-on-push without webhooks, a GitHub App, or touching the repo's CI. The agent polls (each
+tick) the target repo's open PRs for a fresh `/qa <what to test>` comment from an allowed
+author (`allowed_associations`, default OWNER/MEMBER/COLLABORATOR — drive-by comments are
+ignored), resolves the PR's preview URL (newest successful deployment status for the head SHA —
+Vercel/Netlify/Cloudflare all publish `environment_url` — else an operator `preview_url_template`
+with `{branch}` slug substitution), reacts 👀 on pickup, then runs the **existing qa engine**
+against that preview with the comment text as the goal, reusing the target's whole `qa.app`
+config (model, auth capture, wallet shim, storage seeding). One result comment lands on the PR:
+verdict, findings, console/network signals.
+
+Hard safety context (`PRQA=1`, enforced inside `agents/qa.sh`, not just in the caller): **PR
+branches are arbitrary code**, so the wallet is always a fresh unfunded burner (`private_key_env`
+and `allow_funded` are ignored) and issue auto-filing is disabled — findings go to the PR thread
+only. Per-PR daily run cap and a per-tick PR cap bound cost; unresolvable/unreachable previews
+get a polite PR comment instead of a silent skip; per-PR comment-id state prevents re-runs.
+
 ## 6. Models
 
 | Role | Model |

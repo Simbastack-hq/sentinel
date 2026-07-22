@@ -9,7 +9,7 @@ SENTINEL_OS="${SENTINEL_OS:-$(uname -s)}"   # Darwin (launchd) | Linux (systemd 
 . "$SENTINEL_HOME/lib/common.sh"
 
 AGENTS_DIR="$SENTINEL_HOME/agents"
-VALID_AGENTS="review docs-sync qa brain-sync"
+VALID_AGENTS="review docs-sync qa brain-sync pr-qa"
 
 # Run one agent against one target. Always runs (cadence is checked by `tick`, not here).
 dispatch_run(){

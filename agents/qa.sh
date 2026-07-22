@@ -14,7 +14,11 @@ steps="$(t_app "$TARGET" max_steps)"; goal="$(t_app "$TARGET" goal)"; sample_rel
 # Remote mode: point QA at a LIVE/already-deployed URL instead of booting the app locally. recon still runs
 # on the local repo to derive flows; we just drive the remote origin (and assert its api_base). No boot/teardown.
 remote_base="$(t_app "$TARGET" base_url)"
+# pr-qa context (PRQA=1, set by agents/pr-qa.sh): the PR's preview deployment replaces the
+# configured origin, and the /qa comment text replaces the goal.
+[ "${PRQA:-}" = 1 ] && [ -n "${PRQA_BASE_URL:-}" ] && remote_base="$PRQA_BASE_URL"
 remote_mode=0; [ -n "$remote_base" ] && remote_mode=1
+[ "${PRQA:-}" = 1 ] && [ -n "${PRQA_GOAL:-}" ] && goal="$PRQA_GOAL"
 if [ "$remote_mode" != 1 ]; then
   [ -n "$start_cmd" ] && [ -n "$port" ] || { echo "# qa skipped — no app config (need start_cmd+port, or base_url for a live app) for $TARGET" > "$rd/report.md"; result skipped "no app config" 0 "" true "$head"; exit 0; }
 fi
@@ -84,6 +88,9 @@ if [ "$web3_enabled" = true ]; then
   # Resolve the key by env-var NAME (like login creds) — kept out of targets.json and never logged.
   [ -n "$web3_pk_env" ] && web3_pk="${!web3_pk_env:-}"
   [ "$web3_allow_funded" = true ] && web3_allow_funded_flag=1
+  # pr-qa HARD OVERRIDE: PR previews run arbitrary branch code — a funded (or even pinned) key
+  # must never meet it. Always a fresh unfunded burner, funded preflight never relaxed.
+  if [ "${PRQA:-}" = 1 ]; then web3_pk=""; web3_allow_funded_flag=""; fi
   # The whitelist-stub passphrase MUST equal the app's NEXT_PUBLIC_CRYPTO_KEY — read it from the same QA .env
   # so there is a single source of truth (no chance of drift between the stub and the app).
   [ -n "$qa_env_file" ] && [ -f "$qa_env_file" ] && web3_wl_key="$(grep -m1 '^NEXT_PUBLIC_CRYPTO_KEY=' "$qa_env_file" 2>/dev/null | cut -d= -f2-)"
@@ -419,6 +426,8 @@ cp "$qadir/report.html" "$rd/artifacts/report.html" 2>/dev/null || true
 # from flooding the tracker; capped-out findings stay in the report. Issue URLs land in the report,
 # and in result.json (.issue_urls) so the dispatch webhook brief links them.
 issues_repo="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.issues.repo // ""' "$TARGETS_JSON" 2>/dev/null)"
+# pr-qa context: findings go to the PR thread (pr-qa.sh posts them) — never to the issue tracker.
+[ "${PRQA:-}" = 1 ] && issues_repo=""
 issue_urls="[]"
 if [ -n "$issues_repo" ] && [ "$bugs" -gt 0 ] 2>/dev/null; then
   issues_min="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.issues.min_severity // "medium"' "$TARGETS_JSON" 2>/dev/null)"

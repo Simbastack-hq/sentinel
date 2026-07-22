@@ -68,6 +68,17 @@
             "max_per_run": 5
           }
         },
+        "pr-qa": {
+          "_comment": "On-demand QA from a PR comment: a team member comments '/qa <what to test>' on an open PR → Sentinel resolves the PR's preview deployment (deployment status environment_url, else preview_url_template with {branch}), drives it with the comment as the goal (reusing this target's qa.app config), and posts one result comment on the PR. ALWAYS an unfunded burner + no issue filing, regardless of qa.app settings — PR branches are arbitrary code.",
+          "enabled": false,
+          "cadence": "every:5m",
+          "repo": "your-org/my-pms",
+          "command": "/qa",
+          "allowed_associations": ["OWNER", "MEMBER", "COLLABORATOR"],
+          "max_prs_per_tick": 1,
+          "max_runs_per_pr_per_day": 4,
+          "preview_url_template": ""
+        },
         "review": { "enabled": false, "cadence": "on-commit" },
         "brain-sync": { "enabled": true, "cadence": "every:24h" }
       }

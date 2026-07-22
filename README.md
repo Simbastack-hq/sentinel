@@ -12,6 +12,7 @@ Sentinel runs four kinds of agents on a schedule:
 | **docs-sync** | Updates Markdown docs to match the code, in a throwaway worktree, hard-guarded to **docs-only**; emits a patch or PR. | docs only, **never auto-merges** |
 | **qa** | Boots the app and tests it — from a quick UI sweep up to an **autonomous, codebase-aware, deep frontend+backend test suite** that derives the real business flows from your code and exercises them end-to-end. | no (read-only vs the app) |
 | **brain-sync** | Distills each repo's important changes (skills/conventions, architecture, API, deps/infra) into a shared team **knowledge repo** as a PR — one per-repo file, append-only dated bullets, single-file + secret-content guarded. | one per-repo file in the brain, **never auto-merges** |
+| **pr-qa** | **On-demand QA from a PR comment**: a team member comments `/qa <what to test>` on a pull request → Sentinel resolves the PR's preview deployment, drives it with the comment as the goal, and posts one result comment back on the PR. Always an unfunded burner, never files issues. | one PR comment per request |
 
 A launchd heartbeat (`sentinel tick`, every 15 min) checks each target's cadence and runs only what's due. It's self-contained — it only shells out to the CLIs it drives (`pi`/Mimo, `claude`, `codex`, `gh`, Playwright).
 
