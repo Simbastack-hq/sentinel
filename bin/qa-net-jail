@@ -2,8 +2,21 @@
 # Run a command under a dedicated group so nftables egress rules (skgid match) apply to it
 # and every child — i.e. the Playwright browser can't reach private/loopback/metadata hosts.
 # Fail closed: a missing group errors the run rather than silently running unjailed.
+#
+# sg(1) hands its -c string to /bin/sh (dash on Ubuntu), which cannot parse bash-quoted
+# argv (goals contain newlines/quotes/parens). So argv crosses the sg boundary via a
+# NUL-delimited temp file and the script re-execs itself with --inner to rebuild it.
 # usage: qa-net-jail <group> <cmd> [args...]
 set -euo pipefail
+
+if [ "${1:-}" = "--inner" ]; then
+  mapfile -d '' -t argv < "$QA_NET_JAIL_ARGS"
+  rm -f "$QA_NET_JAIL_ARGS"
+  exec "${argv[@]}"
+fi
+
 grp="$1"; shift
 getent group "$grp" >/dev/null || { echo "qa-net-jail: group '$grp' missing — run qa-egress-lockdown.sh first" >&2; exit 1; }
-exec sg "$grp" -c "$(printf '%q ' "$@")"
+QA_NET_JAIL_ARGS="$(mktemp)"; export QA_NET_JAIL_ARGS
+printf '%s\0' "$@" > "$QA_NET_JAIL_ARGS"
+exec sg "$grp" -c "exec bash '${BASH_SOURCE[0]}' --inner"
