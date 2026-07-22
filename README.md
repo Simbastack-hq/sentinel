@@ -2,6 +2,8 @@
 
 **24/7 specialized AI agents that watch your repos and apps and do one job well, unattended.**
 
+**Launch post:** [Sentinel: an open-source QA agent that reads your code before it clicks anything](https://blog.simbastack.com/announcing-sentinel/)
+
 Sentinel runs four kinds of agents on a schedule:
 
 | Agent | What it does | Writes? |
@@ -10,6 +12,7 @@ Sentinel runs four kinds of agents on a schedule:
 | **docs-sync** | Updates Markdown docs to match the code, in a throwaway worktree, hard-guarded to **docs-only**; emits a patch or PR. | docs only, **never auto-merges** |
 | **qa** | Boots the app and tests it — from a quick UI sweep up to an **autonomous, codebase-aware, deep frontend+backend test suite** that derives the real business flows from your code and exercises them end-to-end. | no (read-only vs the app) |
 | **brain-sync** | Distills each repo's important changes (skills/conventions, architecture, API, deps/infra) into a shared team **knowledge repo** as a PR — one per-repo file, append-only dated bullets, single-file + secret-content guarded. | one per-repo file in the brain, **never auto-merges** |
+| **pr-qa** | **On-demand QA from a PR comment**: a team member comments `/qa <what to test>` on a pull request → Sentinel resolves the PR's preview deployment, drives it with the comment as the goal, and posts one result comment back on the PR. Always an unfunded burner, never files issues. | one PR comment per request |
 
 A launchd heartbeat (`sentinel tick`, every 15 min) checks each target's cadence and runs only what's due. It's self-contained — it only shells out to the CLIs it drives (`pi`/Mimo, `claude`, `codex`, `gh`, Playwright).
 
@@ -202,7 +205,7 @@ For apps gated behind MetaMask/Rabby, `qa.app.web3` injects a programmatic walle
 
 ⚠️ `allow_funded` only relaxes the unfunded preflight — **broadcasts are still blocked** (Sentinel never sends an on-chain tx). A real *fill* can still happen if the app submits trades through its **own backend** (signed action / API), so treat this as live trading: use a **small, capped, dedicated** wallet, keep leverage minimal, and make the flow `goal` close what it opens. The key is referenced by env-var name (value in the gitignored `config/sentinel.env`) and never enters the page, model, trace, or logs.
 
-Proven against a live wallet-gated perpetuals exchange frontend on Arbitrum: from an unfunded burner the agent connected, opened the trade screen, and surfaced **9 functional bugs + 13 UI/UX findings** in a 61-step session for ~$0.28 — with **no transaction ever broadcast**.
+Proven against a live wallet-gated perpetuals exchange frontend: from an unfunded burner the agent connected, opened the trade screen, and surfaced **9 functional bugs + 13 UI/UX findings** in a 61-step session for ~$0.28 — with **no transaction ever broadcast**.
 
 Credentials referenced by `email_env`/`password_env` live only in `config/sentinel.env` (gitignored), keyed by the **name** you put in `targets.json`.
 

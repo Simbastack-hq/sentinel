@@ -83,9 +83,15 @@ state_get(){ local f; f="$(state_file "$1" "$2")"; [ -f "$f" ] && jq -r --arg k 
 state_set(){ # target agent k v [k v ...]
   local t="$1" a="$2"; shift 2; local f; f="$(state_file "$t" "$a")"
   [ -f "$f" ] || echo '{}' > "$f"
-  local filter='.'; local -a args=()
-  while [ $# -ge 2 ]; do filter="$filter | .[\"$1\"]=\$$1"; args+=(--arg "$1" "$2"); shift 2; done
-  local tmp; tmp="$(mktemp)"; jq "${args[@]}" "$filter" "$f" > "$tmp" && mv "$tmp" "$f"
+  # Pass BOTH key and value as jq --arg values (indexed k0/v0, k1/v1, …) so an arbitrary key string
+  # is a data value, never spliced into the jq program. The old `.["$1"]=$$1` form used the key
+  # verbatim as a jq VARIABLE NAME, so any key with a '-' (e.g. a date like 2026-07-22) compiled to
+  # subtraction and the whole write silently failed — losing every key in the same call.
+  local filter='.'; local -a args=(); local _i=0
+  while [ $# -ge 2 ]; do
+    args+=(--arg "k$_i" "$1" --arg "v$_i" "$2"); filter="$filter | .[\$k$_i]=\$v$_i"; _i=$((_i+1)); shift 2
+  done
+  local tmp; tmp="$(mktemp)"; jq "${args[@]}" "$filter" "$f" > "$tmp" && mv "$tmp" "$f" || { rm -f "$tmp"; return 1; }
 }
 
 # ---- run meta ----
@@ -132,6 +138,8 @@ lock_acquire(){ # name -> 0 if acquired
   if [ -n "$lpid" ] && kill -0 "$lpid" 2>/dev/null && [ "$age" -lt "$maxage" ]; then return 1; fi
   rm -rf "$d"; mkdir "$d" 2>/dev/null && { echo $$ > "$d/pid"; date +%s > "$d/epoch"; return 0; }; return 1
 }
-lock_release(){ rm -rf "$LOCKS/$1.lock"; }
+# Only the process that owns the lock may release it — otherwise a signal-trap release from one
+# run could delete a lock a second run legitimately holds (breaking single-flight).
+lock_release(){ local d="$LOCKS/$1.lock"; [ "$(cat "$d/pid" 2>/dev/null)" = "$$" ] && rm -rf "$d"; return 0; }
 
 mask(){ sed -E 's/(TOKEN|TOPIC|KEY|SECRET|PASSWORD)=[^ ]*/\1=***/g'; }
