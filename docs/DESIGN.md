@@ -146,7 +146,17 @@ public host only — loopback/private/link-local/metadata/IPv6-literal rejected,
 `preview_url_allow` host-suffix allowlist) before it's driven. The `/qa` comment must come from an
 allowed `author_association` and match the command word on a token boundary (`/qa`, not `/qaXYZ`).
 The comment id + daily slot are **claimed before the run** (crash-safe: a failed run can't
-re-trigger every tick, and it still consumes quota); a new `/qa` comment is the retry.
+re-trigger every tick, and it still consumes quota); a new `/qa` comment is the retry. A
+per-target single-flight lock serializes overlapping runs (scheduled tick vs manual `sentinel run`).
+
+**Residual risk (deployment-hardening, not shell-fixable).** A headless browser inherently follows
+redirects and links, so a validated public preview that 302s to an internal host, or a
+DNS-rebind, can still point the *browser* at an internal target (the reachability `curl` is pinned
+with `--max-redirs 0`, but Playwright is not). Treat this as a deployment control: **set
+`preview_url_allow`** to your known preview domains, and **run the QA host without privileged
+reach into internal networks** (no cloud-metadata endpoint, no private-subnet services). pr-qa is
+built for public preview deployments; don't point it at an environment where the QA box can see
+sensitive internal services.
 
 ## 6. Models
 

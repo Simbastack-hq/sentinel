@@ -378,13 +378,19 @@ export default function (pi: ExtensionAPI) {
       const p = await ensurePage(); if (calls >= MAX_CALLS) return overBudgetMsg(); calls++;
       if (!API_BASE) return text("api_request unavailable: no backend API base configured for this target.");
       const rawPath = String(params.path || "");
-      const url = /^https?:/.test(rawPath) ? rawPath : API_BASE.replace(/\/$/, "") + (rawPath.startsWith("/") ? "" : "/") + rawPath;
+      const readOnly = process.env.QA_API_READONLY === "1";
       const method = String(params.method || "GET").toUpperCase();
-      // pr-qa (QA_API_READONLY=1): the DOM is attacker-controlled PR code, so a prompt-injected
-      // mutating call must be refused outright — read-only assertions only against PR previews.
-      if (process.env.QA_API_READONLY === "1" && method !== "GET") {
+      // pr-qa (QA_API_READONLY=1): the DOM is attacker-controlled PR code. Two confinements:
+      // (1) only GET — no prompt-injected mutation; (2) NO absolute URLs — an absolute rawPath
+      // would escape API_BASE (pinned to the preview's own origin) and let injection probe
+      // loopback/private hosts. Force every call relative, so it can only ever hit the preview.
+      if (readOnly && method !== "GET") {
         return text(`api_request refused: only GET is permitted in PR-preview QA mode (attempted ${method}).`);
       }
+      if (readOnly && /^https?:/i.test(rawPath)) {
+        return text("api_request refused: absolute URLs are not allowed in PR-preview QA mode — use a path relative to the preview's own API.");
+      }
+      const url = (!readOnly && /^https?:/.test(rawPath)) ? rawPath : API_BASE.replace(/\/$/, "") + (rawPath.startsWith("/") ? "" : "/") + rawPath;
       const body = params.body && String(params.body).trim() ? String(params.body) : undefined;
       // SECURITY: only forward the app's bearer to a TRUSTED ORIGIN — the API base origin or the page's own
       // origin. A model-supplied absolute URL to any other host gets no token (the capture regex is for

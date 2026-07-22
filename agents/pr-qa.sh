@@ -35,6 +35,13 @@ case "$max_daily" in ''|*[!0-9]*) max_daily=4;; esac
 [ -n "$repo" ] || { echo "# pr-qa — no repo configured" > "$rd/report.md"; result skipped "no repo (set agents.pr-qa.repo or target.github)" 0 "" true "$head"; exit 0; }
 gh auth status >/dev/null 2>&1 || { echo "# pr-qa — gh not authenticated" > "$rd/report.md"; result error "gh not authenticated" 0 "" false "$head"; exit 0; }
 
+# Single-flight per target: the read-claim-run-write sequence isn't atomic, so two concurrent
+# pr-qa runs for the same target (e.g. a scheduled tick overlapping a manual `sentinel run`) could
+# both claim the same comment. A per-target lock serializes them; a second run skips cleanly.
+prqa_lock="pr-qa-$TARGET"
+lock_acquire "$prqa_lock" || { echo "# pr-qa — another pr-qa run for $TARGET is in progress" > "$rd/report.md"; result skipped "another pr-qa run in progress" 0 "" true "$head"; exit 0; }
+trap 'lock_release "$prqa_lock"' EXIT INT TERM
+
 today="$(date +%F)"
 processed=0; total_bugs=0; notes=""
 
@@ -50,11 +57,14 @@ slugify(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\{1,\
 preview_url_ok(){ # url -> 0 ok / 1 reject (reason on stderr)
   local url="$1" host
   case "$url" in https://*) : ;; *) echo "not https" >&2; return 1;; esac
-  host="${url#https://}"; host="${host%%/*}"; host="${host%%\?*}"
-  # Bracketed IPv6 authority ([::1], [fe80::…]) — reject outright before any ':' port-stripping,
-  # which would otherwise mangle the address and let it through.
+  host="${url#https://}"; host="${host%%/*}"; host="${host%%\?*}"; host="${host%%#*}"
+  # Strip userinfo (user:pass@…) FIRST — else 'user:pass@127.0.0.1' parses to host 'user' and the
+  # loopback address sails through. Strip to the last '@' so the real authority remains.
+  host="${host##*@}"
+  # Bracketed IPv6 authority ([::1], [fe80::…]) — reject before any ':' port-stripping.
   case "$host" in \[*) echo "ipv6 literal not allowed" >&2; return 1;; esac
-  host="${host%%:*}"   # strip :port (safe now that bracketed IPv6 is gone)
+  host="${host%%:*}"   # strip :port
+  host="${host%.}"     # strip a trailing dot ('127.0.0.1.' / 'localhost.') that dodges the guards
   host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
   case "$host" in
     ''|localhost|*.localhost|*.local|*.internal) echo "local host" >&2; return 1;; esac
@@ -74,18 +84,20 @@ preview_url_ok(){ # url -> 0 ok / 1 reject (reason on stderr)
 
 # Resolve the PR's preview URL: prefer the newest successful deployment status for the head SHA
 # (Vercel/Netlify/Cloudflare all publish environment_url there), else the operator's template.
-resolve_preview(){ # sha branch -> url or empty
+resolve_preview(){ # sha branch -> url or empty  (returns only URLs that PASS preview_url_ok)
   local sha="$1" branch="$2" url=""
   local dep_ids; dep_ids="$(gh api "repos/$repo/deployments?sha=$sha&per_page=5" --jq '.[].id' 2>/dev/null)"
   local id
   for id in $dep_ids; do
     url="$(gh api "repos/$repo/deployments/$id/statuses?per_page=10" \
       --jq '[.[] | select(.state=="success") | .environment_url // empty] | map(select(. != "")) | first // empty' 2>/dev/null)"
-    [ -n "$url" ] && { printf '%s' "$url"; return 0; }
+    # Validate here so an invalid/hostile deployment URL is skipped and we keep looking (then fall
+    # through to the template) rather than rejecting the whole request on the first bad one.
+    [ -n "$url" ] && preview_url_ok "$url" 2>/dev/null && { printf '%s' "$url"; return 0; }
   done
   if [ -n "$url_template" ]; then
-    printf '%s' "${url_template//\{branch\}/$(slugify "$branch")}"
-    return 0
+    url="${url_template//\{branch\}/$(slugify "$branch")}"
+    preview_url_ok "$url" 2>/dev/null && { printf '%s' "$url"; return 0; }
   fi
   return 1
 }
@@ -141,24 +153,32 @@ while [ "$i" -lt "$pr_count" ] && [ "$processed" -lt "$max_prs" ]; do
   goal="$(jq -r '.body' <<<"$cmt" | sed "1s|^$command_word||" | sed 's/^[[:space:]]*//' | head -c 2000)"
   [ -n "$goal" ] || goal="$(t_app "$TARGET" goal)"
 
+  # resolve_preview only ever returns an SSRF-guard-passing https URL (or empty).
   preview="$(resolve_preview "$sha" "$branch")" || preview=""
-  if [ -z "$preview" ] || ! preview_url_ok "$preview" 2>>"$rd/run.log"; then
-    reason="couldn't resolve a preview deployment for \`$sha\` (no successful deployment status, no \`preview_url_template\`)"
-    [ -n "$preview" ] && reason="resolved preview \`$preview\` was rejected by the SSRF guard (must be https on a public host)"
-    gh pr comment "$n" --repo "$repo" --body "**sentinel-qa:** $reason. Re-comment \`$command_word\` once the preview build is green." >/dev/null 2>&1 || true
+  if [ -z "$preview" ]; then
+    gh pr comment "$n" --repo "$repo" --body "**sentinel-qa:** no valid preview deployment for \`$sha\` — no green deployment status with an https public-host \`environment_url\`, and no matching \`preview_url_template\`. Re-comment \`$command_word\` once the preview build is green." >/dev/null 2>&1 || true
     notes="$notes
 - PR #$n: no valid preview URL"
     continue
   fi
-  if ! curl -fsS --max-time 15 -o /dev/null "$preview"; then
-    gh pr comment "$n" --repo "$repo" --body "**sentinel-qa:** preview \`$preview\` isn't answering — skipping this run. Re-comment \`$command_word\` once the deployment is up." >/dev/null 2>&1 || true
+  # Reachability probe: --max-redirs 0 so a redirect off the validated origin can't smuggle the
+  # probe to an internal target (the browser's own redirect-following is bounded by preview_url_allow
+  # + running the QA host without privileged internal network reach — see docs).
+  if ! curl -fsS --max-time 15 --max-redirs 0 -o /dev/null "$preview"; then
+    gh pr comment "$n" --repo "$repo" --body "**sentinel-qa:** preview \`$preview\` isn't answering (or redirects off-origin) — skipping. Re-comment \`$command_word\` once the deployment is up." >/dev/null 2>&1 || true
     notes="$notes
 - PR #$n: preview unreachable"
     continue
   fi
 
-  # About to actually run → consume a daily slot (dedup already claimed above).
-  state_set "$TARGET" pr-qa "pr${n}_runs_$today" "$((ran_today + 1))" || true
+  # About to actually run → consume a daily slot (dedup already claimed above). Fail CLOSED: if the
+  # quota can't be recorded, skip rather than run un-counted.
+  if ! state_set "$TARGET" pr-qa "pr${n}_runs_$today" "$((ran_today + 1))"; then
+    echo "warn: could not record pr-qa daily quota for PR #$n — skipping the run (fail closed)"
+    notes="$notes
+- PR #$n: quota write failed (skipped)"
+    continue
+  fi
   # Ack the pickup so the requester knows it's running.
   gh api -X POST "repos/$repo/issues/comments/$cid/reactions" -f content=eyes >/dev/null 2>&1 || true
   echo "pr-qa: PR #$n by @$requester — driving $preview"
