@@ -1,0 +1,248 @@
+#!/usr/bin/env bash
+# pr-qa agent — on-demand QA for pull requests, triggered by a "/qa <what to test>" PR comment.
+#
+# Poll model (no webhooks, no GitHub App): each tick, scan the target repo's open PRs for a new
+# command comment from an allowed author, resolve that PR's preview deployment URL, run the
+# existing qa engine against it with the comment text as the goal, and post ONE result comment
+# back on the PR. The comment gets an "eyes" reaction the moment it's picked up.
+#
+# Reuses the target's agents.qa.app config wholesale (engine, model, auth capture, web3 shim,
+# storage seeding). Hard safety overrides in this context, enforced in agents/qa.sh via PRQA=1:
+#   - always an UNFUNDED fresh burner (funded keys and allow_funded are ignored — PR code is
+#     arbitrary code; a funded session must never meet it)
+#   - GitHub issue auto-filing is OFF (the report goes to the PR thread instead)
+#
+# Inputs (env): RUN_DIR TARGET TARGET_PATH AI_ALLOWED.
+. "$SENTINEL_HOME/lib/common.sh"
+rd="$RUN_DIR"; head="$(git_head "$TARGET_PATH")"
+
+result(){ jq -n --arg v "$1" --arg s "$2" --argjson f "${3:-0}" --arg c "${4:-}" --argjson sk "${5:-false}" --arg sha "${6:-}" \
+  '{verdict:$v,summary:$s,findings:$f,cost:$c,skipped:$sk,sha:$sha}' > "$rd/result.json"; }
+
+if [ "$AI_ALLOWED" != "true" ]; then echo "# pr-qa skipped — ai_allowed is false" > "$rd/report.md"; result skipped "ai_allowed=false" 0 "" true "$head"; exit 0; fi
+
+pq(){ jq -r --arg t "$TARGET" ".targets[\$t].agents[\"pr-qa\"]$1" "$TARGETS_JSON" 2>/dev/null; }
+repo="$(pq '.repo // empty')"; [ -n "$repo" ] || repo="$(t_field "$TARGET" github)"
+command_word="$(pq '.command // "/qa"')"
+allowed="$(pq '.allowed_associations // ["OWNER","MEMBER","COLLABORATOR"] | join(" ")')"
+max_prs="$(pq '.max_prs_per_tick // 1')"
+max_daily="$(pq '.max_runs_per_pr_per_day // 4')"
+url_template="$(pq '.preview_url_template // empty')"
+allow_suffixes="$(pq '.preview_url_allow // [] | join(" ")')"   # optional host-suffix allowlist (e.g. ".vercel.app")
+case "$max_prs" in ''|*[!0-9]*) max_prs=1;; esac
+case "$max_daily" in ''|*[!0-9]*) max_daily=4;; esac
+
+[ -n "$repo" ] || { echo "# pr-qa — no repo configured" > "$rd/report.md"; result skipped "no repo (set agents.pr-qa.repo or target.github)" 0 "" true "$head"; exit 0; }
+gh auth status >/dev/null 2>&1 || { echo "# pr-qa — gh not authenticated" > "$rd/report.md"; result error "gh not authenticated" 0 "" false "$head"; exit 0; }
+
+# Single-flight per target: the read-claim-run-write sequence isn't atomic, so two concurrent
+# pr-qa runs for the same target (e.g. a scheduled tick overlapping a manual `sentinel run`) could
+# both claim the same comment. A per-target lock serializes them; a second run skips cleanly.
+prqa_lock="pr-qa-$TARGET"
+lock_acquire "$prqa_lock" || { echo "# pr-qa — another pr-qa run for $TARGET is in progress" > "$rd/report.md"; result skipped "another pr-qa run in progress" 0 "" true "$head"; exit 0; }
+# EXIT fires once at the end (normal or via the signal handlers, which exit). Ownership-checked
+# release means even a stray double-fire can't drop another run's lock.
+trap 'lock_release "$prqa_lock"' EXIT
+trap 'lock_release "$prqa_lock"; exit 143' TERM
+trap 'lock_release "$prqa_lock"; exit 130' INT
+
+today="$(date +%F)"
+processed=0; total_bugs=0; notes=""
+
+# Slugify a branch name the way Vercel does for {branch} in preview_url_template (lowercase,
+# non-alphanumerics collapsed to '-'). Best-effort — deployment-status lookup is the reliable path.
+slugify(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\{1,\}/-/g; s/^-//; s/-$//'; }
+
+# SSRF guard: a deployment status' environment_url is data from a third party (the deploy provider,
+# influenced by the PR). Only https:// on a public host may become a QA target — reject any other
+# scheme, and reject loopback / private / link-local / cloud-metadata hosts so a hostile
+# environment_url can't turn the QA box into an internal-network probe. Optional preview_url_allow
+# (list of host suffixes) tightens it further to the known preview domains.
+preview_url_ok(){ # url -> 0 ok / 1 reject (reason on stderr)
+  local url="$1" host
+  case "$url" in https://*) : ;; *) echo "not https" >&2; return 1;; esac
+  host="${url#https://}"; host="${host%%/*}"; host="${host%%\?*}"; host="${host%%#*}"
+  # Strip userinfo (user:pass@…) FIRST — else 'user:pass@127.0.0.1' parses to host 'user' and the
+  # loopback address sails through. Strip to the last '@' so the real authority remains.
+  host="${host##*@}"
+  # Bracketed IPv6 authority ([::1], [fe80::…]) — reject before any ':' port-stripping.
+  case "$host" in \[*) echo "ipv6 literal not allowed" >&2; return 1;; esac
+  host="${host%%:*}"   # strip :port
+  host="${host%.}"     # strip a trailing dot ('127.0.0.1.' / 'localhost.') that dodges the guards
+  host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
+  case "$host" in
+    ''|localhost|*.localhost|*.local|*.internal) echo "local host" >&2; return 1;; esac
+  case "$host" in *[!a-z0-9.-]*) echo "invalid host chars" >&2; return 1;; esac
+  # Reject bare-integer / hex / octal IP encodings (2130706433, 0x7f000001, 017700000001) and any
+  # single-label host: a real preview host is a dotted FQDN, and a dotted-quad is range-checked
+  # below. Anything with no dot can't be canonicalized by a string check, so refuse it.
+  case "$host" in *.*) : ;; *) echo "single-label / numeric host — refused" >&2; return 1;; esac
+  # IPv4 literal → block loopback/private/link-local/CGNAT/metadata ranges.
+  case "$host" in
+    127.*|10.*|192.168.*|169.254.*|0.*|100.6[4-9].*|100.[7-9][0-9].*|100.1[0-1][0-9].*|100.12[0-7].*) echo "private/loopback ip" >&2; return 1;;
+    172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) echo "private ip" >&2; return 1;;
+  esac
+  # preview_url_allow (host-suffix allowlist) is REQUIRED — pr-qa only ever drives an explicit set
+  # of known public preview domains. Empty ⇒ refuse everything (fail closed). This is the primary
+  # containment; the range checks above are defense-in-depth. (DNS rebinding of an allowlisted host
+  # and browser redirect-following are network-layer residuals — see DESIGN §5d.)
+  [ -n "$allow_suffixes" ] || { echo "preview_url_allow is not set (required for pr-qa)" >&2; return 1; }
+  local s ok=1
+  for s in $allow_suffixes; do case "$host" in *"$s") ok=0; break;; esac; done
+  [ "$ok" = 0 ] || { echo "host not in preview_url_allow" >&2; return 1; }
+  return 0
+}
+
+# Resolve the PR's preview URL: prefer the newest successful deployment status for the head SHA
+# (Vercel/Netlify/Cloudflare all publish environment_url there), else the operator's template.
+resolve_preview(){ # sha branch -> url or empty  (returns only URLs that PASS preview_url_ok)
+  local sha="$1" branch="$2" url=""
+  local dep_ids; dep_ids="$(gh api "repos/$repo/deployments?sha=$sha&per_page=5" --jq '.[].id' 2>/dev/null)"
+  local id
+  for id in $dep_ids; do
+    url="$(gh api "repos/$repo/deployments/$id/statuses?per_page=10" \
+      --jq '[.[] | select(.state=="success") | .environment_url // empty] | map(select(. != "")) | first // empty' 2>/dev/null)"
+    # Validate here so an invalid/hostile deployment URL is skipped and we keep looking (then fall
+    # through to the template) rather than rejecting the whole request on the first bad one.
+    [ -n "$url" ] && preview_url_ok "$url" 2>/dev/null && { printf '%s' "$url"; return 0; }
+  done
+  if [ -n "$url_template" ]; then
+    url="${url_template//\{branch\}/$(slugify "$branch")}"
+    preview_url_ok "$url" 2>/dev/null && { printf '%s' "$url"; return 0; }
+  fi
+  return 1
+}
+
+prs="$(gh api "repos/$repo/pulls?state=open&per_page=30" \
+  --jq '[.[] | {n: .number, branch: .head.ref, sha: .head.sha}]' 2>>"$rd/run.log")" || prs="[]"
+pr_count="$(jq 'length' <<<"$prs")"
+echo "pr-qa: $repo — $pr_count open PR(s), command '$command_word'"
+
+i=0
+while [ "$i" -lt "$pr_count" ] && [ "$processed" -lt "$max_prs" ]; do
+  n="$(jq -r ".[$i].n" <<<"$prs")"; branch="$(jq -r ".[$i].branch" <<<"$prs")"; sha="$(jq -r ".[$i].sha" <<<"$prs")"
+  i=$((i+1))
+
+  # Newest qualifying command comment: allowed author association, body is exactly the command word
+  # or command-word-then-whitespace (so '/qa' doesn't fire on '/qaXYZ'), id newer than the last one
+  # processed for this PR. Author association is from GitHub's comment object, not comment text.
+  last_id="$(state_get "$TARGET" pr-qa "pr${n}_last_id")"; : "${last_id:=0}"
+  allowed_json="$(printf '%s\n' $allowed | jq -R . | jq -sc .)"
+  cmt="$(gh api "repos/$repo/issues/$n/comments?per_page=100" 2>>"$rd/run.log" | jq -c \
+    --arg cw "$command_word" --argjson allowed "$allowed_json" \
+    '[.[] | select(.body | startswith($cw))
+          | select(.body == $cw or (.body[($cw|length):] | test("^\\s")))
+          | select(.author_association as $a | $allowed | index($a))
+          | {id, body, user: .user.login}] | sort_by(.id) | last // empty' 2>>"$rd/run.log")"
+  [ -n "$cmt" ] && [ "$cmt" != "null" ] || continue
+  cid="$(jq -r '.id' <<<"$cmt")"
+  [ "$cid" -gt "$last_id" ] 2>/dev/null || continue
+  requester="$(jq -r '.user' <<<"$cmt")"
+
+  # Per-PR daily cap — checked before claiming. Fail closed and loud on the PR.
+  ran_today="$(state_get "$TARGET" pr-qa "pr${n}_runs_$today")"; : "${ran_today:=0}"
+  case "$ran_today" in ''|*[!0-9]*) ran_today=0;; esac
+  if [ "$ran_today" -ge "$max_daily" ]; then
+    state_set "$TARGET" pr-qa "pr${n}_last_id" "$cid" || true   # dedup-claim so we don't re-post every tick
+    gh pr comment "$n" --repo "$repo" --body "**sentinel-qa:** daily run cap ($max_daily) reached for this PR — try again tomorrow or bump \`max_runs_per_pr_per_day\`." >/dev/null 2>&1 || true
+    notes="$notes
+- PR #$n: daily cap reached"
+    continue
+  fi
+
+  # CLAIM THE COMMENT NOW, before doing anything expensive — a crash, timeout, or unreachable
+  # preview must never leave this comment un-claimed and re-triggering every tick. A new /qa
+  # comment (new id) is the retry mechanism. If the claim write itself fails, skip rather than
+  # risk a re-run loop.
+  if ! state_set "$TARGET" pr-qa "pr${n}_last_id" "$cid"; then
+    echo "warn: could not persist pr-qa claim for PR #$n — skipping to avoid a re-run loop"
+    notes="$notes
+- PR #$n: state write failed (skipped)"
+    continue
+  fi
+
+  goal="$(jq -r '.body' <<<"$cmt" | sed "1s|^$command_word||" | sed 's/^[[:space:]]*//' | head -c 2000)"
+  [ -n "$goal" ] || goal="$(t_app "$TARGET" goal)"
+
+  # resolve_preview only ever returns an SSRF-guard-passing https URL (or empty).
+  preview="$(resolve_preview "$sha" "$branch")" || preview=""
+  if [ -z "$preview" ]; then
+    gh pr comment "$n" --repo "$repo" --body "**sentinel-qa:** no valid preview deployment for \`$sha\` — no green deployment status with an https public-host \`environment_url\`, and no matching \`preview_url_template\`. Re-comment \`$command_word\` once the preview build is green." >/dev/null 2>&1 || true
+    notes="$notes
+- PR #$n: no valid preview URL"
+    continue
+  fi
+  # Reachability probe. -f alone treats a 3xx as success, so read the status explicitly and treat a
+  # redirect as "not cleanly reachable" (a redirect off the validated origin is exactly what we
+  # don't want to hand the browser). 2xx only.
+  http_code="$(curl -s --max-time 15 --max-redirs 0 -o /dev/null -w '%{http_code}' "$preview" 2>/dev/null || echo 000)"
+  case "$http_code" in
+    2*) : ;;
+    *) gh pr comment "$n" --repo "$repo" --body "**sentinel-qa:** preview \`$preview\` returned \`$http_code\` (not a clean 2xx — a redirect or error) — skipping. Re-comment \`$command_word\` once the deployment serves the preview directly." >/dev/null 2>&1 || true
+       notes="$notes
+- PR #$n: preview not 2xx ($http_code)"
+       continue;;
+  esac
+
+  # About to actually run → consume a daily slot (dedup already claimed above). Fail CLOSED: if the
+  # quota can't be recorded, skip rather than run un-counted.
+  if ! state_set "$TARGET" pr-qa "pr${n}_runs_$today" "$((ran_today + 1))"; then
+    echo "warn: could not record pr-qa daily quota for PR #$n — skipping the run (fail closed)"
+    notes="$notes
+- PR #$n: quota write failed (skipped)"
+    continue
+  fi
+  # Ack the pickup so the requester knows it's running.
+  gh api -X POST "repos/$repo/issues/comments/$cid/reactions" -f content=eyes >/dev/null 2>&1 || true
+  echo "pr-qa: PR #$n by @$requester — driving $preview"
+
+  prd="$rd/pr-$n"; mkdir -p "$prd/artifacts"; : > "$prd/run.log"
+  # Same target, same qa app config — only the origin, goal, and safety context differ.
+  PRQA=1 PRQA_BASE_URL="$preview" PRQA_GOAL="$goal" \
+  RUN_ID="${RUN_ID:-pr$n}" RUN_DIR="$prd" TARGET="$TARGET" TARGET_PATH="$TARGET_PATH" AI_ALLOWED="$AI_ALLOWED" SENTINEL_HOME="$SENTINEL_HOME" \
+    bash "$SENTINEL_HOME/agents/qa.sh" >>"$prd/run.log" 2>&1
+  rc=$?
+
+  verdict="error"; bugs=0; summary="qa run produced no result (rc=$rc)"
+  if [ -f "$prd/result.json" ]; then
+    verdict="$(jq -r '.verdict // "error"' "$prd/result.json")"
+    bugs="$(jq -r '.findings // 0' "$prd/result.json")"
+    summary="$(jq -r '.summary // ""' "$prd/result.json")"
+  fi
+  total_bugs=$((total_bugs + bugs))
+
+  rep="$prd/artifacts/qa/report.json"
+  body="**sentinel-qa** drove this PR's preview (\`$preview\`) — verdict: **$verdict**
+
+**Goal:** $goal
+"
+  if [ -f "$rep" ] && [ "$bugs" -gt 0 ] 2>/dev/null; then
+    body="$body
+**Findings:**
+$(jq -r '.bugs[] | "- **[\(.severity)]** \(.desc)"' "$rep" 2>/dev/null | head -10)
+"
+  fi
+  if [ -f "$rep" ]; then
+    con="$(jq -r '.consoleErrors | length' "$rep" 2>/dev/null)"; net="$(jq -r '.failedRequests | length' "$rep" 2>/dev/null)"
+    body="$body
+_console errors: ${con:-0} • failed requests: ${net:-0} • unfunded test wallet • full trace on the QA box (run ${RUN_ID:-?})_"
+  fi
+  gh pr comment "$n" --repo "$repo" --body "$body" >/dev/null 2>>"$rd/run.log" || echo "warn: failed to post PR comment for #$n"
+
+  # dedup id + daily slot were claimed before the run (crash-safe) — nothing more to persist here.
+  processed=$((processed + 1))
+  notes="$notes
+- PR #$n (@$requester): $verdict, $bugs finding(s) — $preview"
+done
+
+{
+  echo "# pr-qa — $TARGET ($repo)"
+  echo
+  if [ "$processed" -gt 0 ] || [ -n "$notes" ]; then echo "Processed this tick:$notes"; else echo "_no new $command_word requests_"; fi
+} > "$rd/report.md"
+
+if [ "$processed" -gt 0 ]; then
+  result issues "ran $processed PR request(s), $total_bugs finding(s)" "$total_bugs" "" false "$head"
+else
+  result skipped "no new $command_word requests" 0 "" true "$head"
+fi

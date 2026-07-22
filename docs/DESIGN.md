@@ -123,6 +123,41 @@ agents/qa.sh                          pi-ext/qa-browser/web3.ts (installWeb3)
 
 This tests the full wallet-gated frontend (connect → trade form → quotes/validation → the approve/open path) end to end; on-chain submission hits the unfunded wall (`insufficient funds`), which the goal tells the agent is **expected**, so it focuses on rendering/quote/validation/state bugs. For real on-chain *execution* without real money, point `web3.rpc` at a local `anvil --fork-url` of the chain (the deny-list still blocks accidental mainnet broadcast).
 
+## 5d. pr-qa — on-demand QA from a PR comment
+
+Test-on-push without webhooks, a GitHub App, or touching the repo's CI. The agent polls (each
+tick) the target repo's open PRs for a fresh `/qa <what to test>` comment from an allowed
+author (`allowed_associations`, default OWNER/MEMBER/COLLABORATOR — drive-by comments are
+ignored), resolves the PR's preview URL (newest successful deployment status for the head SHA —
+Vercel/Netlify/Cloudflare all publish `environment_url` — else an operator `preview_url_template`
+with `{branch}` slug substitution), reacts 👀 on pickup, then runs the **existing qa engine**
+against that preview with the comment text as the goal, reusing the target's whole `qa.app`
+config (model, auth capture, wallet shim, storage seeding). One result comment lands on the PR:
+verdict, findings, console/network signals.
+
+Hard safety context (`PRQA=1`, enforced inside `agents/qa.sh`, not just in the caller): **PR
+branches are arbitrary code**, so under `PRQA=1` — (a) the wallet is always a fresh unfunded
+burner (`private_key_env`/`allow_funded` ignored — its signatures are worthless); (b) configured
+**login credentials are never typed** into the preview (attacker JS would read them); (c)
+`api_request` is pinned to the preview's **own** origin and forced **GET-only** (`QA_API_READONLY`)
+so a prompt-injected write from attacker DOM can't reach a real backend; (d) issue auto-filing is
+off — findings go to the PR thread. The resolved preview URL passes an **SSRF guard** (https on a
+public host only — loopback/private/link-local/metadata/IPv6-literal rejected, optional
+`preview_url_allow` host-suffix allowlist) before it's driven. The `/qa` comment must come from an
+allowed `author_association` and match the command word on a token boundary (`/qa`, not `/qaXYZ`).
+The comment id + daily slot are **claimed before the run** (crash-safe: a failed run can't
+re-trigger every tick, and it still consumes quota); a new `/qa` comment is the retry. A
+per-target single-flight lock serializes overlapping runs (scheduled tick vs manual `sentinel run`).
+
+**Residual risk (deployment-hardening, not shell-fixable).** A headless browser inherently follows
+redirects and links, so a validated public preview that 302s to an internal host, or a
+DNS-rebind, can still point the *browser* at an internal target (the reachability `curl` is pinned
+with `--max-redirs 0`, but Playwright is not). Treat this as a deployment control: **set
+`preview_url_allow`** to your known preview domains, and **run the QA host without privileged
+reach into internal networks** (no cloud-metadata endpoint, no private-subnet services). pr-qa is
+built for public preview deployments; don't point it at an environment where the QA box can see
+sensitive internal services.
+
 ## 6. Models
 
 | Role | Model |

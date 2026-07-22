@@ -14,7 +14,11 @@ steps="$(t_app "$TARGET" max_steps)"; goal="$(t_app "$TARGET" goal)"; sample_rel
 # Remote mode: point QA at a LIVE/already-deployed URL instead of booting the app locally. recon still runs
 # on the local repo to derive flows; we just drive the remote origin (and assert its api_base). No boot/teardown.
 remote_base="$(t_app "$TARGET" base_url)"
+# pr-qa context (PRQA=1, set by agents/pr-qa.sh): the PR's preview deployment replaces the
+# configured origin, and the /qa comment text replaces the goal.
+[ "${PRQA:-}" = 1 ] && [ -n "${PRQA_BASE_URL:-}" ] && remote_base="$PRQA_BASE_URL"
 remote_mode=0; [ -n "$remote_base" ] && remote_mode=1
+[ "${PRQA:-}" = 1 ] && [ -n "${PRQA_GOAL:-}" ] && goal="$PRQA_GOAL"
 if [ "$remote_mode" != 1 ]; then
   [ -n "$start_cmd" ] && [ -n "$port" ] || { echo "# qa skipped — no app config (need start_cmd+port, or base_url for a live app) for $TARGET" > "$rd/report.md"; result skipped "no app config" 0 "" true "$head"; exit 0; }
 fi
@@ -25,6 +29,10 @@ host="$(t_app "$TARGET" host)"; : "${host:=127.0.0.1}"   # browser origin (some 
 api_base="$(t_app "$TARGET" api_base)"                    # backend API base for flow-engine assertions (e.g. http://localhost:4000)
 # Single source for the browser origin: the remote URL, or the locally-booted web port.
 if [ "$remote_mode" = 1 ]; then qa_base="${remote_base%/}"; : "${api_base:=$qa_base}"; else qa_base="http://$host:$port"; fi
+# pr-qa HARD OVERRIDE: pin api_request to the PR preview's OWN origin, never a target's configured
+# shared/live api_base. A prompt-injected write from attacker DOM must not be able to reach a real
+# backend; combined with PRQA_READONLY (GET-only, set below) the tool can only read the preview.
+[ "${PRQA:-}" = 1 ] && api_base="$qa_base"
 # Fail CLOSED: driving a non-local origin can act on live data (UI actions + authenticated api_request).
 # Require an explicit opt-in so a stray base_url can't silently hammer staging/prod.
 if [ "$remote_mode" = 1 ]; then
@@ -56,6 +64,10 @@ lp_env="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.login.password_env
 login_email=""; login_pw=""
 [ -n "$le_env" ] && login_email="${!le_env:-}"
 [ -n "$lp_env" ] && login_pw="${!lp_env:-}"
+# pr-qa HARD OVERRIDE: a PR preview runs the PR author's JavaScript, so typing real login
+# credentials into its form would hand them to attacker-controlled code. Never send form creds
+# to a PR preview — the (unfunded, worthless) wallet path is the only auth pr-qa uses.
+if [ "${PRQA:-}" = 1 ]; then login_email=""; login_pw=""; fi
 
 # Branch / worktree boot (optional): QA a branch other than the checked-out one, in a THROWAWAY git
 # worktree — the target's real working tree is never touched. Deps install into the worktree.
@@ -84,6 +96,9 @@ if [ "$web3_enabled" = true ]; then
   # Resolve the key by env-var NAME (like login creds) — kept out of targets.json and never logged.
   [ -n "$web3_pk_env" ] && web3_pk="${!web3_pk_env:-}"
   [ "$web3_allow_funded" = true ] && web3_allow_funded_flag=1
+  # pr-qa HARD OVERRIDE: PR previews run arbitrary branch code — a funded (or even pinned) key
+  # must never meet it. Always a fresh unfunded burner, funded preflight never relaxed.
+  if [ "${PRQA:-}" = 1 ]; then web3_pk=""; web3_allow_funded_flag=""; fi
   # The whitelist-stub passphrase MUST equal the app's NEXT_PUBLIC_CRYPTO_KEY — read it from the same QA .env
   # so there is a single source of truth (no chance of drift between the stub and the app).
   [ -n "$qa_env_file" ] && [ -f "$qa_env_file" ] && web3_wl_key="$(grep -m1 '^NEXT_PUBLIC_CRYPTO_KEY=' "$qa_env_file" 2>/dev/null | cut -d= -f2-)"
@@ -298,7 +313,7 @@ EOF
         QA_OUT="$fdir" QA_BASE="$qa_base" QA_GOAL="$fname" QA_API_BASE="$api_base" \
         QA_MODEL="$QA_MODEL" QA_MAX_TOOLCALLS="${FLOW_STEPS:-90}" QA_HEADLESS="$QA_HEADLESS" \
         QA_LOGIN_EMAIL="$login_email" QA_LOGIN_PASSWORD="$login_pw" QA_LOGIN_PATH="$login_path" QA_START_PATH="$start_path" \
-        QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" QA_SEED_STORAGE="$qa_seed_storage" \
+        QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" QA_SEED_STORAGE="$qa_seed_storage" QA_API_READONLY="${PRQA:-}" \
         WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" WEB3_PK="$web3_pk" WEB3_ALLOW_FUNDED="$web3_allow_funded_flag" \
         run_to "$CMD_TIMEOUT" pi -p -nbt --no-session -e "$ext" \
           --tools browser_snapshot,browser_click,browser_type,browser_upload,browser_navigate,browser_scroll,api_request,report_bug,finish \
@@ -332,7 +347,7 @@ EOF
     QA_OUT="$qadir" QA_BASE="$qa_base" QA_SAMPLE="$sample" QA_GOAL="$goal" \
     QA_MODEL="$QA_MODEL" QA_MAX_TOOLCALLS="$((steps * 2))" QA_HEADLESS="$QA_HEADLESS" \
     QA_LOGIN_EMAIL="$login_email" QA_LOGIN_PASSWORD="$login_pw" QA_LOGIN_PATH="$login_path" QA_START_PATH="$start_path" \
-    QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" QA_SEED_STORAGE="$qa_seed_storage" \
+    QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" QA_SEED_STORAGE="$qa_seed_storage" QA_API_READONLY="${PRQA:-}" \
     WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" WEB3_PK="$web3_pk" WEB3_ALLOW_FUNDED="$web3_allow_funded_flag" \
     run_to "$CMD_TIMEOUT" pi -p -nbt --no-session -e "$ext" \
       --tools browser_snapshot,browser_click,browser_type,browser_upload,browser_navigate,browser_scroll,report_bug,finish \
@@ -419,6 +434,8 @@ cp "$qadir/report.html" "$rd/artifacts/report.html" 2>/dev/null || true
 # from flooding the tracker; capped-out findings stay in the report. Issue URLs land in the report,
 # and in result.json (.issue_urls) so the dispatch webhook brief links them.
 issues_repo="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.issues.repo // ""' "$TARGETS_JSON" 2>/dev/null)"
+# pr-qa context: findings go to the PR thread (pr-qa.sh posts them) — never to the issue tracker.
+[ "${PRQA:-}" = 1 ] && issues_repo=""
 issue_urls="[]"
 if [ -n "$issues_repo" ] && [ "$bugs" -gt 0 ] 2>/dev/null; then
   issues_min="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.issues.min_severity // "medium"' "$TARGETS_JSON" 2>/dev/null)"
