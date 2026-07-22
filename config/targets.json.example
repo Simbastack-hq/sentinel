@@ -77,7 +77,8 @@
           "allowed_associations": ["OWNER", "MEMBER", "COLLABORATOR"],
           "max_prs_per_tick": 1,
           "max_runs_per_pr_per_day": 4,
-          "preview_url_template": ""
+          "preview_url_template": "",
+          "preview_url_allow": []
         },
         "review": { "enabled": false, "cadence": "on-commit" },
         "brain-sync": { "enabled": true, "cadence": "every:24h" }

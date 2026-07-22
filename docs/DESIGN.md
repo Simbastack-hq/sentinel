@@ -136,10 +136,17 @@ config (model, auth capture, wallet shim, storage seeding). One result comment l
 verdict, findings, console/network signals.
 
 Hard safety context (`PRQA=1`, enforced inside `agents/qa.sh`, not just in the caller): **PR
-branches are arbitrary code**, so the wallet is always a fresh unfunded burner (`private_key_env`
-and `allow_funded` are ignored) and issue auto-filing is disabled — findings go to the PR thread
-only. Per-PR daily run cap and a per-tick PR cap bound cost; unresolvable/unreachable previews
-get a polite PR comment instead of a silent skip; per-PR comment-id state prevents re-runs.
+branches are arbitrary code**, so under `PRQA=1` — (a) the wallet is always a fresh unfunded
+burner (`private_key_env`/`allow_funded` ignored — its signatures are worthless); (b) configured
+**login credentials are never typed** into the preview (attacker JS would read them); (c)
+`api_request` is pinned to the preview's **own** origin and forced **GET-only** (`QA_API_READONLY`)
+so a prompt-injected write from attacker DOM can't reach a real backend; (d) issue auto-filing is
+off — findings go to the PR thread. The resolved preview URL passes an **SSRF guard** (https on a
+public host only — loopback/private/link-local/metadata/IPv6-literal rejected, optional
+`preview_url_allow` host-suffix allowlist) before it's driven. The `/qa` comment must come from an
+allowed `author_association` and match the command word on a token boundary (`/qa`, not `/qaXYZ`).
+The comment id + daily slot are **claimed before the run** (crash-safe: a failed run can't
+re-trigger every tick, and it still consumes quota); a new `/qa` comment is the retry.
 
 ## 6. Models
 

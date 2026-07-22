@@ -380,6 +380,11 @@ export default function (pi: ExtensionAPI) {
       const rawPath = String(params.path || "");
       const url = /^https?:/.test(rawPath) ? rawPath : API_BASE.replace(/\/$/, "") + (rawPath.startsWith("/") ? "" : "/") + rawPath;
       const method = String(params.method || "GET").toUpperCase();
+      // pr-qa (QA_API_READONLY=1): the DOM is attacker-controlled PR code, so a prompt-injected
+      // mutating call must be refused outright — read-only assertions only against PR previews.
+      if (process.env.QA_API_READONLY === "1" && method !== "GET") {
+        return text(`api_request refused: only GET is permitted in PR-preview QA mode (attempted ${method}).`);
+      }
       const body = params.body && String(params.body).trim() ? String(params.body) : undefined;
       // SECURITY: only forward the app's bearer to a TRUSTED ORIGIN — the API base origin or the page's own
       // origin. A model-supplied absolute URL to any other host gets no token (the capture regex is for

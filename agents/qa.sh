@@ -29,6 +29,10 @@ host="$(t_app "$TARGET" host)"; : "${host:=127.0.0.1}"   # browser origin (some 
 api_base="$(t_app "$TARGET" api_base)"                    # backend API base for flow-engine assertions (e.g. http://localhost:4000)
 # Single source for the browser origin: the remote URL, or the locally-booted web port.
 if [ "$remote_mode" = 1 ]; then qa_base="${remote_base%/}"; : "${api_base:=$qa_base}"; else qa_base="http://$host:$port"; fi
+# pr-qa HARD OVERRIDE: pin api_request to the PR preview's OWN origin, never a target's configured
+# shared/live api_base. A prompt-injected write from attacker DOM must not be able to reach a real
+# backend; combined with PRQA_READONLY (GET-only, set below) the tool can only read the preview.
+[ "${PRQA:-}" = 1 ] && api_base="$qa_base"
 # Fail CLOSED: driving a non-local origin can act on live data (UI actions + authenticated api_request).
 # Require an explicit opt-in so a stray base_url can't silently hammer staging/prod.
 if [ "$remote_mode" = 1 ]; then
@@ -60,6 +64,10 @@ lp_env="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.login.password_env
 login_email=""; login_pw=""
 [ -n "$le_env" ] && login_email="${!le_env:-}"
 [ -n "$lp_env" ] && login_pw="${!lp_env:-}"
+# pr-qa HARD OVERRIDE: a PR preview runs the PR author's JavaScript, so typing real login
+# credentials into its form would hand them to attacker-controlled code. Never send form creds
+# to a PR preview — the (unfunded, worthless) wallet path is the only auth pr-qa uses.
+if [ "${PRQA:-}" = 1 ]; then login_email=""; login_pw=""; fi
 
 # Branch / worktree boot (optional): QA a branch other than the checked-out one, in a THROWAWAY git
 # worktree — the target's real working tree is never touched. Deps install into the worktree.
@@ -305,7 +313,7 @@ EOF
         QA_OUT="$fdir" QA_BASE="$qa_base" QA_GOAL="$fname" QA_API_BASE="$api_base" \
         QA_MODEL="$QA_MODEL" QA_MAX_TOOLCALLS="${FLOW_STEPS:-90}" QA_HEADLESS="$QA_HEADLESS" \
         QA_LOGIN_EMAIL="$login_email" QA_LOGIN_PASSWORD="$login_pw" QA_LOGIN_PATH="$login_path" QA_START_PATH="$start_path" \
-        QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" QA_SEED_STORAGE="$qa_seed_storage" \
+        QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" QA_SEED_STORAGE="$qa_seed_storage" QA_API_READONLY="${PRQA:-}" \
         WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" WEB3_PK="$web3_pk" WEB3_ALLOW_FUNDED="$web3_allow_funded_flag" \
         run_to "$CMD_TIMEOUT" pi -p -nbt --no-session -e "$ext" \
           --tools browser_snapshot,browser_click,browser_type,browser_upload,browser_navigate,browser_scroll,api_request,report_bug,finish \
@@ -339,7 +347,7 @@ EOF
     QA_OUT="$qadir" QA_BASE="$qa_base" QA_SAMPLE="$sample" QA_GOAL="$goal" \
     QA_MODEL="$QA_MODEL" QA_MAX_TOOLCALLS="$((steps * 2))" QA_HEADLESS="$QA_HEADLESS" \
     QA_LOGIN_EMAIL="$login_email" QA_LOGIN_PASSWORD="$login_pw" QA_LOGIN_PATH="$login_path" QA_START_PATH="$start_path" \
-    QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" QA_SEED_STORAGE="$qa_seed_storage" \
+    QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" QA_SEED_STORAGE="$qa_seed_storage" QA_API_READONLY="${PRQA:-}" \
     WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" WEB3_PK="$web3_pk" WEB3_ALLOW_FUNDED="$web3_allow_funded_flag" \
     run_to "$CMD_TIMEOUT" pi -p -nbt --no-session -e "$ext" \
       --tools browser_snapshot,browser_click,browser_type,browser_upload,browser_navigate,browser_scroll,report_bug,finish \

@@ -28,6 +28,7 @@ allowed="$(pq '.allowed_associations // ["OWNER","MEMBER","COLLABORATOR"] | join
 max_prs="$(pq '.max_prs_per_tick // 1')"
 max_daily="$(pq '.max_runs_per_pr_per_day // 4')"
 url_template="$(pq '.preview_url_template // empty')"
+allow_suffixes="$(pq '.preview_url_allow // [] | join(" ")')"   # optional host-suffix allowlist (e.g. ".vercel.app")
 case "$max_prs" in ''|*[!0-9]*) max_prs=1;; esac
 case "$max_daily" in ''|*[!0-9]*) max_daily=4;; esac
 
@@ -40,6 +41,36 @@ processed=0; total_bugs=0; notes=""
 # Slugify a branch name the way Vercel does for {branch} in preview_url_template (lowercase,
 # non-alphanumerics collapsed to '-'). Best-effort — deployment-status lookup is the reliable path.
 slugify(){ printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]\{1,\}/-/g; s/^-//; s/-$//'; }
+
+# SSRF guard: a deployment status' environment_url is data from a third party (the deploy provider,
+# influenced by the PR). Only https:// on a public host may become a QA target — reject any other
+# scheme, and reject loopback / private / link-local / cloud-metadata hosts so a hostile
+# environment_url can't turn the QA box into an internal-network probe. Optional preview_url_allow
+# (list of host suffixes) tightens it further to the known preview domains.
+preview_url_ok(){ # url -> 0 ok / 1 reject (reason on stderr)
+  local url="$1" host
+  case "$url" in https://*) : ;; *) echo "not https" >&2; return 1;; esac
+  host="${url#https://}"; host="${host%%/*}"; host="${host%%\?*}"
+  # Bracketed IPv6 authority ([::1], [fe80::…]) — reject outright before any ':' port-stripping,
+  # which would otherwise mangle the address and let it through.
+  case "$host" in \[*) echo "ipv6 literal not allowed" >&2; return 1;; esac
+  host="${host%%:*}"   # strip :port (safe now that bracketed IPv6 is gone)
+  host="$(printf '%s' "$host" | tr '[:upper:]' '[:lower:]')"
+  case "$host" in
+    ''|localhost|*.localhost|*.local|*.internal) echo "local host" >&2; return 1;; esac
+  # IPv4 literal → block loopback/private/link-local/metadata ranges.
+  case "$host" in
+    127.*|10.*|192.168.*|169.254.*|0.*|100.6[4-9].*|100.[7-9][0-9].*|100.1[0-1][0-9].*|100.12[0-7].*) echo "private/loopback ip" >&2; return 1;;
+    172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) echo "private ip" >&2; return 1;;
+  esac
+  case "$host" in *:*) echo "ipv6 literal not allowed" >&2; return 1;; esac   # dodge ::1 / fc00::/fe80:: entirely
+  if [ -n "$allow_suffixes" ]; then
+    local s ok=1
+    for s in $allow_suffixes; do case "$host" in *"$s") ok=0; break;; esac; done
+    [ "$ok" = 0 ] || { echo "host not in preview_url_allow" >&2; return 1; }
+  fi
+  return 0
+}
 
 # Resolve the PR's preview URL: prefer the newest successful deployment status for the head SHA
 # (Vercel/Netlify/Cloudflare all publish environment_url there), else the operator's template.
@@ -69,47 +100,65 @@ while [ "$i" -lt "$pr_count" ] && [ "$processed" -lt "$max_prs" ]; do
   n="$(jq -r ".[$i].n" <<<"$prs")"; branch="$(jq -r ".[$i].branch" <<<"$prs")"; sha="$(jq -r ".[$i].sha" <<<"$prs")"
   i=$((i+1))
 
-  # Newest qualifying command comment: allowed author association, body starts with the command
-  # word, id newer than the last one we processed for this PR.
+  # Newest qualifying command comment: allowed author association, body is exactly the command word
+  # or command-word-then-whitespace (so '/qa' doesn't fire on '/qaXYZ'), id newer than the last one
+  # processed for this PR. Author association is from GitHub's comment object, not comment text.
   last_id="$(state_get "$TARGET" pr-qa "pr${n}_last_id")"; : "${last_id:=0}"
-  cmt="$(gh api "repos/$repo/issues/$n/comments?per_page=100" --jq \
-    "[.[] | select(.body | startswith(\"$command_word\"))
-         | select([.author_association] | inside([$(printf '"%s",' $allowed | sed 's/,$//')]))
-         | {id, body, user: .user.login}] | sort_by(.id) | last // empty" 2>>"$rd/run.log")"
-  [ -n "$cmt" ] || continue
+  allowed_json="$(printf '%s\n' $allowed | jq -R . | jq -sc .)"
+  cmt="$(gh api "repos/$repo/issues/$n/comments?per_page=100" 2>>"$rd/run.log" | jq -c \
+    --arg cw "$command_word" --argjson allowed "$allowed_json" \
+    '[.[] | select(.body | startswith($cw))
+          | select(.body == $cw or (.body[($cw|length):] | test("^\\s")))
+          | select(.author_association as $a | $allowed | index($a))
+          | {id, body, user: .user.login}] | sort_by(.id) | last // empty' 2>>"$rd/run.log")"
+  [ -n "$cmt" ] && [ "$cmt" != "null" ] || continue
   cid="$(jq -r '.id' <<<"$cmt")"
   [ "$cid" -gt "$last_id" ] 2>/dev/null || continue
+  requester="$(jq -r '.user' <<<"$cmt")"
 
-  # Per-PR daily cap — fail closed and loud on the PR so the requester isn't left waiting.
+  # Per-PR daily cap — checked before claiming. Fail closed and loud on the PR.
   ran_today="$(state_get "$TARGET" pr-qa "pr${n}_runs_$today")"; : "${ran_today:=0}"
+  case "$ran_today" in ''|*[!0-9]*) ran_today=0;; esac
   if [ "$ran_today" -ge "$max_daily" ]; then
-    state_set "$TARGET" pr-qa "pr${n}_last_id" "$cid"
+    state_set "$TARGET" pr-qa "pr${n}_last_id" "$cid" || true   # dedup-claim so we don't re-post every tick
     gh pr comment "$n" --repo "$repo" --body "**sentinel-qa:** daily run cap ($max_daily) reached for this PR — try again tomorrow or bump \`max_runs_per_pr_per_day\`." >/dev/null 2>&1 || true
     notes="$notes
 - PR #$n: daily cap reached"
     continue
   fi
 
-  goal="$(jq -r '.body' <<<"$cmt" | sed "s|^$command_word||" | sed 's/^[[:space:]]*//')"
+  # CLAIM THE COMMENT NOW, before doing anything expensive — a crash, timeout, or unreachable
+  # preview must never leave this comment un-claimed and re-triggering every tick. A new /qa
+  # comment (new id) is the retry mechanism. If the claim write itself fails, skip rather than
+  # risk a re-run loop.
+  if ! state_set "$TARGET" pr-qa "pr${n}_last_id" "$cid"; then
+    echo "warn: could not persist pr-qa claim for PR #$n — skipping to avoid a re-run loop"
+    notes="$notes
+- PR #$n: state write failed (skipped)"
+    continue
+  fi
+
+  goal="$(jq -r '.body' <<<"$cmt" | sed "1s|^$command_word||" | sed 's/^[[:space:]]*//' | head -c 2000)"
   [ -n "$goal" ] || goal="$(t_app "$TARGET" goal)"
-  requester="$(jq -r '.user' <<<"$cmt")"
 
   preview="$(resolve_preview "$sha" "$branch")" || preview=""
-  if [ -z "$preview" ]; then
-    state_set "$TARGET" pr-qa "pr${n}_last_id" "$cid"
-    gh pr comment "$n" --repo "$repo" --body "**sentinel-qa:** couldn't resolve a preview deployment for \`$sha\` (no successful deployment status, no \`preview_url_template\`). Is the preview build green?" >/dev/null 2>&1 || true
+  if [ -z "$preview" ] || ! preview_url_ok "$preview" 2>>"$rd/run.log"; then
+    reason="couldn't resolve a preview deployment for \`$sha\` (no successful deployment status, no \`preview_url_template\`)"
+    [ -n "$preview" ] && reason="resolved preview \`$preview\` was rejected by the SSRF guard (must be https on a public host)"
+    gh pr comment "$n" --repo "$repo" --body "**sentinel-qa:** $reason. Re-comment \`$command_word\` once the preview build is green." >/dev/null 2>&1 || true
     notes="$notes
-- PR #$n: no preview URL"
+- PR #$n: no valid preview URL"
     continue
   fi
   if ! curl -fsS --max-time 15 -o /dev/null "$preview"; then
-    state_set "$TARGET" pr-qa "pr${n}_last_id" "$cid"
     gh pr comment "$n" --repo "$repo" --body "**sentinel-qa:** preview \`$preview\` isn't answering — skipping this run. Re-comment \`$command_word\` once the deployment is up." >/dev/null 2>&1 || true
     notes="$notes
 - PR #$n: preview unreachable"
     continue
   fi
 
+  # About to actually run → consume a daily slot (dedup already claimed above).
+  state_set "$TARGET" pr-qa "pr${n}_runs_$today" "$((ran_today + 1))" || true
   # Ack the pickup so the requester knows it's running.
   gh api -X POST "repos/$repo/issues/comments/$cid/reactions" -f content=eyes >/dev/null 2>&1 || true
   echo "pr-qa: PR #$n by @$requester — driving $preview"
@@ -147,7 +196,7 @@ _console errors: ${con:-0} • failed requests: ${net:-0} • unfunded test wall
   fi
   gh pr comment "$n" --repo "$repo" --body "$body" >/dev/null 2>>"$rd/run.log" || echo "warn: failed to post PR comment for #$n"
 
-  state_set "$TARGET" pr-qa "pr${n}_last_id" "$cid" "pr${n}_runs_$today" "$((ran_today + 1))"
+  # dedup id + daily slot were claimed before the run (crash-safe) — nothing more to persist here.
   processed=$((processed + 1))
   notes="$notes
 - PR #$n (@$requester): $verdict, $bugs finding(s) — $preview"
