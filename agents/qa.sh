@@ -93,15 +93,19 @@ web3_stubs="$(jq -c --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.stubs // 
 # and opt in to a FUNDED key. Only for a small capped canary — broadcasts stay blocked. Default = fresh unfunded burner.
 web3_pk_env="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.private_key_env // empty' "$TARGETS_JSON" 2>/dev/null)"
 web3_allow_funded="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.allow_funded // false' "$TARGETS_JSON" 2>/dev/null)"
-web3_on=""; web3_wl_key=""; web3_pk=""; web3_allow_funded_flag=""
+web3_allow_broadcast="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.allow_broadcast // false' "$TARGETS_JSON" 2>/dev/null)"
+web3_bc_chain="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.broadcast_chain_id // empty' "$TARGETS_JSON" 2>/dev/null)"
+web3_bc_rpc="$(jq -r --arg t "$TARGET" '.targets[$t].agents.qa.app.web3.broadcast_rpc // empty' "$TARGETS_JSON" 2>/dev/null)"
+web3_on=""; web3_wl_key=""; web3_pk=""; web3_allow_funded_flag=""; web3_allow_broadcast_flag=""
 if [ "$web3_enabled" = true ]; then
   web3_on=1
   # Resolve the key by env-var NAME (like login creds) — kept out of targets.json and never logged.
   [ -n "$web3_pk_env" ] && web3_pk="${!web3_pk_env:-}"
   [ "$web3_allow_funded" = true ] && web3_allow_funded_flag=1
-  # pr-qa HARD OVERRIDE: PR previews run arbitrary branch code — a funded (or even pinned) key
-  # must never meet it. Always a fresh unfunded burner, funded preflight never relaxed.
-  if [ "${PRQA:-}" = 1 ]; then web3_pk=""; web3_allow_funded_flag=""; fi
+  [ "$web3_allow_broadcast" = true ] && web3_allow_broadcast_flag=1
+  # pr-qa HARD OVERRIDE: PR previews run arbitrary branch code — a funded (or even pinned) key, and
+  # certainly not real broadcasting, must never meet it. Always a fresh unfunded, non-broadcasting burner.
+  if [ "${PRQA:-}" = 1 ]; then web3_pk=""; web3_allow_funded_flag=""; web3_allow_broadcast_flag=""; fi
   # The whitelist-stub passphrase MUST equal the app's NEXT_PUBLIC_CRYPTO_KEY — read it from the same QA .env
   # so there is a single source of truth (no chance of drift between the stub and the app).
   [ -n "$qa_env_file" ] && [ -f "$qa_env_file" ] && web3_wl_key="$(grep -m1 '^NEXT_PUBLIC_CRYPTO_KEY=' "$qa_env_file" 2>/dev/null | cut -d= -f2-)"
@@ -318,7 +322,7 @@ EOF
         QA_LOGIN_EMAIL="$login_email" QA_LOGIN_PASSWORD="$login_pw" QA_LOGIN_PATH="$login_path" QA_START_PATH="$start_path" \
         QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" QA_SEED_STORAGE="$qa_seed_storage" QA_API_READONLY="${PRQA:-}" \
         QA_SNAP_MAX="$qa_snap_max" \
-        WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" WEB3_PK="$web3_pk" WEB3_ALLOW_FUNDED="$web3_allow_funded_flag" \
+        WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" WEB3_PK="$web3_pk" WEB3_ALLOW_FUNDED="$web3_allow_funded_flag" WEB3_ALLOW_BROADCAST="$web3_allow_broadcast_flag" WEB3_BC_CHAIN_ID="$web3_bc_chain" WEB3_BC_RPC="$web3_bc_rpc" \
         run_to "$CMD_TIMEOUT" ${QA_NET_GROUP:+"$SENTINEL_HOME/bin/qa-net-jail" "$QA_NET_GROUP"} pi -p -nbt --no-session -e "$ext" \
           --tools browser_snapshot,browser_click,browser_type,browser_upload,browser_navigate,browser_scroll,api_request,report_bug,finish \
           --provider "$QA_PROVIDER" --model "$QA_MODEL" --thinking "$QA_THINKING" --mode json \
@@ -353,7 +357,7 @@ EOF
     QA_LOGIN_EMAIL="$login_email" QA_LOGIN_PASSWORD="$login_pw" QA_LOGIN_PATH="$login_path" QA_START_PATH="$start_path" \
     QA_AUTH_URL_RE="$auth_capture_url_re" QA_AUTH_STORAGE_KEY="$auth_storage_key" QA_SEED_STORAGE="$qa_seed_storage" QA_API_READONLY="${PRQA:-}" \
     QA_SNAP_MAX="$qa_snap_max" \
-    WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" WEB3_PK="$web3_pk" WEB3_ALLOW_FUNDED="$web3_allow_funded_flag" \
+    WEB3_ENABLED="$web3_on" WEB3_RPC="$web3_rpc" WEB3_CHAIN_ID="$web3_chain" WEB3_WL_KEY="$web3_wl_key" WEB3_STUBS="$web3_stubs" WEB3_PK="$web3_pk" WEB3_ALLOW_FUNDED="$web3_allow_funded_flag" WEB3_ALLOW_BROADCAST="$web3_allow_broadcast_flag" WEB3_BC_CHAIN_ID="$web3_bc_chain" WEB3_BC_RPC="$web3_bc_rpc" \
     run_to "$CMD_TIMEOUT" ${QA_NET_GROUP:+"$SENTINEL_HOME/bin/qa-net-jail" "$QA_NET_GROUP"} pi -p -nbt --no-session -e "$ext" \
       --tools browser_snapshot,browser_click,browser_type,browser_upload,browser_navigate,browser_scroll,report_bug,finish \
       --provider "$QA_PROVIDER" --model "$QA_MODEL" --thinking "$QA_THINKING" --mode json \

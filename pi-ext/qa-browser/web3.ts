@@ -30,7 +30,13 @@ export interface Web3Config {
   chainId: number; // e.g. 42161
   privateKey?: string; // optional; if absent a FRESH random burner is generated (recommended)
   allowFunded?: boolean; // OPT-IN: permit a key with on-chain balance/nonce (a small, capped canary wallet).
-                         // Broadcasts are STILL blocked; this only relaxes the unfunded preflight. Cap the balance.
+                         // Broadcasts are STILL blocked unless allowBroadcast is ALSO set; this only relaxes the unfunded preflight.
+  allowBroadcast?: boolean; // OPT-IN (requires allowFunded): actually sign + broadcast eth_sendTransaction, for
+                            // full user-like funded QA. Broadcasts are permitted ONLY while the wallet's current
+                            // chain === broadcastChainId. The small capped float is the only spend guard.
+  broadcastChainId?: number; // the chain on which broadcasts are allowed (e.g. HyperEVM 999). Distinct from the
+                             // login chainId (cfg.chainId, e.g. Arbitrum 42161) which the dApp switches away from.
+  broadcastRpcUrl?: string;  // RPC endpoint for the broadcast chain (build/estimate/send happen here).
 }
 
 export interface StubConfig {
@@ -125,6 +131,17 @@ function providerInitScript(addr, chainHex) {
         } catch (_) {}
         try {
           provider.emit("accountsChanged", res);
+        } catch (_) {}
+      }
+      // A successful chain switch must fire chainChanged so wagmi/viem re-read the chain (else the app
+      // keeps signing/estimating against the old chain after the dApp switches to HyperEVM for vault txs).
+      if (method === "wallet_switchEthereumChain" && params && params[0] && params[0].chainId) {
+        try {
+          provider.chainId = params[0].chainId;
+          provider.networkVersion = String(parseInt(params[0].chainId, 16));
+        } catch (_) {}
+        try {
+          provider.emit("chainChanged", params[0].chainId);
         } catch (_) {}
       }
       return res;
@@ -228,6 +245,30 @@ export async function installWeb3(page: Page, cfg: Web3Config, stubs: StubConfig
   // never a silently-generated fresh burner mislabeled as funded.
   if (allowFunded && !supplied) ABORT("allow_funded is set but no valid private key was supplied (set web3.private_key_env → a 0x + 64-hex key)");
 
+  // Broadcast opt-in (funded user-like QA). Requires a funded key + a distinct broadcast chain/RPC.
+  const allowBroadcast = !!cfg.allowBroadcast;
+  const bcChainId = cfg.broadcastChainId || 0;
+  const bcRpcUrl = cfg.broadcastRpcUrl || "";
+  if (allowBroadcast && !allowFunded) ABORT("allow_broadcast requires allow_funded (a real, small, capped canary key)");
+  if (allowBroadcast && !(bcChainId && bcRpcUrl)) ABORT("allow_broadcast set but broadcastChainId/broadcastRpcUrl are missing");
+  // The set of chains this wallet will operate on: login chain (typed-data auth) + the broadcast chain (vault txs).
+  const allowedChains = new Set<number>([cfg.chainId, ...(allowBroadcast ? [bcChainId] : [])]);
+  const rpcFor = (chain: number) => (chain === bcChainId && bcRpcUrl ? bcRpcUrl : cfg.rpcUrl);
+  let curChain = cfg.chainId; // mutable; wallet_switchEthereumChain flips it. Broadcasts only on bcChainId.
+
+  // Build a viem wallet client bound to the broadcast chain (used ONLY for real eth_sendTransaction).
+  let walletClient: any = null;
+  if (allowBroadcast) {
+    const { createWalletClient, http, defineChain } = await import("viem");
+    const bcChain = defineChain({
+      id: bcChainId, name: "broadcast-" + bcChainId,
+      nativeCurrency: { name: "HYPE", symbol: "HYPE", decimals: 18 },
+      rpcUrls: { default: { http: [bcRpcUrl] } },
+    });
+    walletClient = createWalletClient({ account, chain: bcChain, transport: http(bcRpcUrl) });
+    console.error(`sentinel web3: allow_broadcast ON — real transactions WILL be signed+sent on chain ${bcChainId} for ${address}. Keep the float small; this is the only spend cap.`);
+  }
+
   // (1) chainId is ALWAYS verified — a mismatch always aborts (wrong-RPC / cross-chain-replay risk). When the
   // RPC can't be reached to verify it, fail CLOSED for a supplied/funded key (we can't confirm the chain); for a
   // freshly generated unfunded burner an unreachable RPC stays non-fatal (unfunded by construction, no broadcast).
@@ -266,20 +307,47 @@ export async function installWeb3(page: Page, cfg: Web3Config, stubs: StubConfig
 
   async function handle(method: string, params: any[]): Promise<any> {
     const m = String(method || "");
-    // 1) STRUCTURAL broadcast block — no transaction is ever signed-and-sent (any casing/variant).
+    // 1) Broadcast handling. Default: STRUCTURAL block (any casing/variant). When allow_broadcast is ON and the
+    //    wallet is currently on the broadcast chain, eth_sendTransaction is really signed + sent; everything else
+    //    that submits/authorizes a tx (raw sends, eth_signTransaction, batched sends) is STILL blocked.
     if (DENY_RE.test(m)) {
-      throw Object.assign(new Error("insufficient funds for gas * price + value (sentinel: unfunded QA burner — no transaction is ever broadcast)"), { code: -32000 });
+      const isPlainSend = /^eth_sendtransaction$/i.test(m);
+      if (allowBroadcast && isPlainSend && curChain === bcChainId && walletClient) {
+        const tx = (params && params[0]) || {};
+        const toBig = (v: any) => (v == null || v === "" ? undefined : BigInt(v));
+        try {
+          const hash = await walletClient.sendTransaction({
+            to: tx.to,
+            data: tx.data,
+            value: toBig(tx.value),
+            gas: toBig(tx.gas),
+          });
+          console.error(`sentinel web3: BROADCAST sent on chain ${bcChainId} → ${hash} (to ${tx.to})`);
+          return hash;
+        } catch (e: any) {
+          throw Object.assign(new Error(`sentinel broadcast failed: ${String(e?.shortMessage || e?.message || e).slice(0, 200)}`), { code: -32000 });
+        }
+      }
+      const why = allowBroadcast
+        ? `broadcast only permitted for eth_sendTransaction while on chain ${bcChainId} (current ${curChain})`
+        : "sentinel: unfunded QA burner — no transaction is ever broadcast";
+      throw Object.assign(new Error(`insufficient funds for gas * price + value (${why})`), { code: -32000 });
     }
-    // 2) Wallet / account / chain / message-signing answered locally (no money, no broadcast).
+    // 2) Wallet / account / chain / message-signing answered locally.
     switch (m) {
       case "eth_requestAccounts":
       case "eth_accounts":
         return [address];
       case "eth_chainId":
-        return chainHex;
+        return "0x" + curChain.toString(16);
       case "net_version":
-        return String(cfg.chainId);
-      case "wallet_switchEthereumChain":
+        return String(curChain);
+      case "wallet_switchEthereumChain": {
+        const want = params && params[0] && params[0].chainId != null ? parseInt(String(params[0].chainId), 16) : NaN;
+        if (!Number.isNaN(want) && allowedChains.has(want)) { curChain = want; return null; }
+        // Unknown chain: refuse like MetaMask (4902) so the dApp can surface an add-chain flow rather than assume success.
+        throw Object.assign(new Error(`sentinel: chain ${want} not configured for this QA wallet`), { code: 4902 });
+      }
       case "wallet_addEthereumChain":
       case "wallet_watchAsset":
         return null;
@@ -296,16 +364,16 @@ export async function installWeb3(page: Page, cfg: Web3Config, stubs: StubConfig
       case "eth_signTypedData":
       case "eth_signTypedData_v4": {
         const data = typeof params[1] === "string" ? JSON.parse(params[1]) : params[1];
-        // Defense-in-depth: never sign typed data bound to a different chain (cross-chain replay risk).
-        if (data && data.domain && data.domain.chainId != null && Number(data.domain.chainId) !== cfg.chainId) {
-          throw Object.assign(new Error(`sentinel: refusing to sign typed data for chainId ${data.domain.chainId} (QA chain is ${cfg.chainId})`), { code: -32000 });
+        // Defense-in-depth: only sign typed data bound to a chain this QA wallet operates on (replay safety).
+        if (data && data.domain && data.domain.chainId != null && !allowedChains.has(Number(data.domain.chainId))) {
+          throw Object.assign(new Error(`sentinel: refusing to sign typed data for chainId ${data.domain.chainId} (allowed: ${[...allowedChains].join(",")})`), { code: -32000 });
         }
         return await account.signTypedData(data);
       }
     }
-    // 3) READ-only methods proxy to the RPC. Everything else is REFUSED (never silently proxied).
-    if (READ_RE.test(m)) return await rpcCall(cfg.rpcUrl, m, params || []);
-    throw Object.assign(new Error(`sentinel: method '${m}' is not permitted in QA (only reads + local wallet/sign methods are allowed; nothing is broadcast)`), { code: -32601 });
+    // 3) READ-only methods proxy to the RPC for the CURRENT chain. Everything else is REFUSED.
+    if (READ_RE.test(m)) return await rpcCall(rpcFor(curChain), m, params || []);
+    throw Object.assign(new Error(`sentinel: method '${m}' is not permitted in QA (only reads + local wallet/sign methods are allowed)`), { code: -32601 });
   }
 
   await page.exposeFunction("__sentinelWeb3", async (method: string, params: any[]) => {

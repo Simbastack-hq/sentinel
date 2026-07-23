@@ -127,16 +127,21 @@ async function ensurePage(): Promise<Page> {
       const wlKey = process.env.WEB3_WL_KEY || "";
       stubs = stubs.map((s: any) => (s && s.whitelist ? { ...s, whitelistKey: wlKey } : s));
       const allowFunded = process.env.WEB3_ALLOW_FUNDED === "1";
+      const allowBroadcast = process.env.WEB3_ALLOW_BROADCAST === "1";
       const { address } = await installWeb3(page, {
         rpcUrl: process.env.WEB3_RPC || "https://arb1.arbitrum.io/rpc",
         chainId: parseInt(process.env.WEB3_CHAIN_ID || "42161", 10),
         privateKey: process.env.WEB3_PK || undefined,
         allowFunded,
+        allowBroadcast,
+        broadcastChainId: process.env.WEB3_BC_CHAIN_ID ? parseInt(process.env.WEB3_BC_CHAIN_ID, 10) : undefined,
+        broadcastRpcUrl: process.env.WEB3_BC_RPC || undefined,
       }, stubs);
-      // The ADDRESS is safe to record; the private KEY never leaves Node. allow_funded = a capped canary wallet
-      // (broadcasts are still blocked — a real fill only happens if the app submits via its own backend).
-      const kind = allowFunded ? "funded canary wallet" : "unfunded burner";
-      trace.push({ n: 0, action: { type: "web3" }, observation: `injected ${kind} ${address} on chain ${process.env.WEB3_CHAIN_ID || "42161"} (txs never broadcast)`, result: allowFunded ? "no on-chain tx broadcast; cap the balance" : "no real funds can move", screenshot: "" });
+      // The ADDRESS is safe to record; the private KEY never leaves Node. allow_funded = a capped canary wallet.
+      // allow_broadcast = real user-like funded QA: eth_sendTransaction IS signed+sent on the broadcast chain.
+      const kind = allowBroadcast ? "funded canary wallet (BROADCAST ON)" : allowFunded ? "funded canary wallet" : "unfunded burner";
+      const txnote = allowBroadcast ? `real txs broadcast on chain ${process.env.WEB3_BC_CHAIN_ID || "?"}; float is the only cap` : allowFunded ? "no on-chain tx broadcast; cap the balance" : "no real funds can move";
+      trace.push({ n: 0, action: { type: "web3" }, observation: `injected ${kind} ${address} on chain ${process.env.WEB3_CHAIN_ID || "42161"}`, result: txnote, screenshot: "" });
     } catch (e: any) {
       const msg = String(e?.message || e);
       // A tripped safety guard (a FUNDED/used key) must HARD-ABORT — never drive a wallet that could move
@@ -454,7 +459,7 @@ export default function (pi: ExtensionAPI) {
         // fetch from INSIDE the page → inherits the app origin + auth. Prefer the sniffed header; else read a
         // bearer token from localStorage (configured key first, then the Supabase default shape). Bearer is
         // attached ONLY when allowAuth (trusted destination); cookies (credentials:include) are origin-scoped anyway.
-        res = await p.evaluate(async ({ url, method, body, auth, storageKey, allowAuth }: any) => {
+        res = await p.evaluate(async ({ url, method, body, auth, storageKey, allowAuth, readOnly }: any) => {
           let authHeader = allowAuth ? (auth || "") : "";
           if (!authHeader && allowAuth) {
             // Pull an access token out of common localStorage shapes (Supabase, Zustand-persist, plain JWT).
@@ -485,7 +490,7 @@ export default function (pi: ExtensionAPI) {
           const r = await fetch(url, { method, headers, body, credentials: "include", redirect: readOnly ? "manual" : "follow" });
           const t = await r.text();
           return { status: r.status, body: t.slice(0, 2500) };
-        }, { url, method, body, auth: capturedAuth, storageKey: AUTH_STORAGE_KEY, allowAuth });
+        }, { url, method, body, auth: capturedAuth, storageKey: AUTH_STORAGE_KEY, allowAuth, readOnly });
       } catch (e: any) { res = { status: 0, body: "request failed: " + (e?.message || e) }; }
       trace.push({ n: calls, action: { type: "api" }, observation: `${method} ${rawPath} → ${res.status}`, result: String(res.body).slice(0, 200) });
       return text(`API ${method} ${url} → HTTP ${res.status}\n${res.body}${budgetNote()}`);
