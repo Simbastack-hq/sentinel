@@ -295,7 +295,9 @@ export async function installWeb3(page: Page, cfg: Web3Config, stubs: StubConfig
       // generated fresh key + flaky RPC → safe to proceed (unfunded by construction; broadcast blocked below)
     }
   } else {
-    console.error(`sentinel web3: allow_funded set — NOT enforcing the unfunded preflight for ${address}. Broadcasts remain blocked; keep this wallet's balance small/capped.`);
+    // Say which it is: with allow_broadcast also on, the old unconditional "broadcasts remain
+    // blocked" wording directly contradicts the allow_broadcast banner printed just above it.
+    console.error(`sentinel web3: allow_funded set — NOT enforcing the unfunded preflight for ${address}. ${allowBroadcast ? `Broadcasts ARE permitted (chain ${bcChainId} only)` : "Broadcasts remain blocked"}; keep this wallet's balance small/capped.`);
   }
 
   // Broadcast deny-list (prefix, case-insensitive): NO method that submits or authorizes a transaction is
