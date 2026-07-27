@@ -16,6 +16,10 @@ const OUT = process.env.QA_OUT || "/tmp/qa-pi";
 const BASE = process.env.QA_BASE || "http://127.0.0.1:3009";
 const SAMPLE = process.env.QA_SAMPLE || "";
 const MAX_CALLS = parseInt(process.env.QA_MAX_TOOLCALLS || "30", 10);
+// How many interactive elements SNAP indexes per snapshot. Dense apps put real controls past the
+// default cap — e.g. a trading page whose "Close position" button sits below 40 other controls is
+// invisible to the agent, so it can never close what it opened. Raise per-target via app.snap_max.
+const SNAP_MAX = Math.max(10, parseInt(process.env.QA_SNAP_MAX || "40", 10) || 40);
 const HEADLESS = process.env.QA_HEADLESS !== "0";
 // Optional login. Credentials come from env (set by qa.sh from config/sentinel.env); used ONLY to fill the
 // form via Playwright — never sent to the model, never written to the trace/report/logs.
@@ -50,7 +54,7 @@ let capturedAuth = ""; // the real Authorization header the frontend sends to it
 
 // Tag visible interactive elements (+ always file inputs) and return an indexed list.
 // Mirrors v1 bin/qa-drive.js SNAP. Runs in the browser context.
-function SNAP() {
+function SNAP(maxEls: number) {
   document.querySelectorAll("[data-qa-idx]").forEach((e) => e.removeAttribute("data-qa-idx"));
   const baseSel = 'a,button,input,select,textarea,label,[role=button],[role=link],[role=tab],[onclick],[contenteditable="true"],[tabindex],[draggable="true"]';
   const isVisible = (el: Element) => {
@@ -65,9 +69,32 @@ function SNAP() {
     if (seen.has(el)) return;
     if (getComputedStyle(el as HTMLElement).cursor === "pointer" && isVisible(el)) { seen.add(el); cand.push(el); }
   });
+  // Modal-aware ordering: when a modal/dialog/overlay is open, index ITS interactive elements FIRST. A user
+  // can only act on the modal anyway, and a portal-rendered modal lands at the END of the DOM — so on a dense
+  // page (more controls than the index cap) its options would fall past it and be invisible to the agent (why wallet
+  // pickers / onboarding modals looked like "nothing happened").
+  const modalRoot: Element | null = (() => {
+    const dlg = Array.from(document.querySelectorAll('[role="dialog"],[aria-modal="true"]')).filter(isVisible);
+    if (dlg.length) return dlg[dlg.length - 1];
+    let best: Element | null = null, bestZ = 9; // ignore low-z fixed chrome (headers/footers)
+    document.querySelectorAll("*").forEach((el) => {
+      const st = getComputedStyle(el as HTMLElement);
+      if (st.position !== "fixed" || !isVisible(el)) return;
+      const r = (el as HTMLElement).getBoundingClientRect();
+      if (r.width < window.innerWidth * 0.3 || r.height < window.innerHeight * 0.3) return;
+      const z = parseInt(st.zIndex || "0", 10) || 0;
+      if (z > bestZ) { best = el; bestZ = z; }
+    });
+    return best;
+  })();
+  if (modalRoot) {
+    const inModal: Element[] = [], rest: Element[] = [];
+    for (const el of cand) (modalRoot.contains(el) ? inModal : rest).push(el);
+    cand.length = 0; cand.push(...inModal, ...rest);
+  }
   const out: any[] = []; let i = 0;
   for (const el of cand) {
-    if (i >= 40) break;
+    if (i >= maxEls) break;
     const isFile = el.tagName === "INPUT" && ((el.getAttribute("type") || "").toLowerCase() === "file");
     if (!isFile && !isVisible(el)) continue;
     el.setAttribute("data-qa-idx", String(i));
@@ -100,16 +127,21 @@ async function ensurePage(): Promise<Page> {
       const wlKey = process.env.WEB3_WL_KEY || "";
       stubs = stubs.map((s: any) => (s && s.whitelist ? { ...s, whitelistKey: wlKey } : s));
       const allowFunded = process.env.WEB3_ALLOW_FUNDED === "1";
+      const allowBroadcast = process.env.WEB3_ALLOW_BROADCAST === "1";
       const { address } = await installWeb3(page, {
         rpcUrl: process.env.WEB3_RPC || "https://arb1.arbitrum.io/rpc",
         chainId: parseInt(process.env.WEB3_CHAIN_ID || "42161", 10),
         privateKey: process.env.WEB3_PK || undefined,
         allowFunded,
+        allowBroadcast,
+        broadcastChainId: process.env.WEB3_BC_CHAIN_ID ? parseInt(process.env.WEB3_BC_CHAIN_ID, 10) : undefined,
+        broadcastRpcUrl: process.env.WEB3_BC_RPC || undefined,
       }, stubs);
-      // The ADDRESS is safe to record; the private KEY never leaves Node. allow_funded = a capped canary wallet
-      // (broadcasts are still blocked — a real fill only happens if the app submits via its own backend).
-      const kind = allowFunded ? "funded canary wallet" : "unfunded burner";
-      trace.push({ n: 0, action: { type: "web3" }, observation: `injected ${kind} ${address} on chain ${process.env.WEB3_CHAIN_ID || "42161"} (txs never broadcast)`, result: allowFunded ? "no on-chain tx broadcast; cap the balance" : "no real funds can move", screenshot: "" });
+      // The ADDRESS is safe to record; the private KEY never leaves Node. allow_funded = a capped canary wallet.
+      // allow_broadcast = real user-like funded QA: eth_sendTransaction IS signed+sent on the broadcast chain.
+      const kind = allowBroadcast ? "funded canary wallet (BROADCAST ON)" : allowFunded ? "funded canary wallet" : "unfunded burner";
+      const txnote = allowBroadcast ? `real txs broadcast on chain ${process.env.WEB3_BC_CHAIN_ID || "?"}; float is the only cap` : allowFunded ? "no on-chain tx broadcast; cap the balance" : "no real funds can move";
+      trace.push({ n: 0, action: { type: "web3" }, observation: `injected ${kind} ${address} on chain ${process.env.WEB3_CHAIN_ID || "42161"}`, result: txnote, screenshot: "" });
     } catch (e: any) {
       const msg = String(e?.message || e);
       // A tripped safety guard (a FUNDED/used key) must HARD-ABORT — never drive a wallet that could move
@@ -142,6 +174,10 @@ async function ensurePage(): Promise<Page> {
         // remaining keys. Seeding is attempted at document init; the trace records the attempt
         // (init scripts can't report back), so it says "seeding", not "seeded".
         await page.addInitScript((kv: [string, string][]) => {
+          // Only seed the TOP frame (the app's own origin). addInitScript runs in EVERY frame, and
+          // writing localStorage in a cross-origin subframe (e.g. an embedded auth iframe) throws a
+          // SecurityError that would console.error and be mis-reported as an app bug.
+          if (window.top !== window.self) return;
           for (const [k, v] of kv) {
             try { window.localStorage.setItem(k, v); }
             // console.error is the one channel the driver already captures into the report's
@@ -262,7 +298,7 @@ export default function (pi: ExtensionAPI) {
     async execute() {
       const p = await ensurePage(); if (calls >= MAX_CALLS) return overBudgetMsg(); calls++;
       let els: any[] = [];
-      try { els = await p.evaluate(SNAP); } catch (e: any) { return text("page unavailable: " + String(e?.message || e).split("\n")[0].slice(0, 160) + " — call finish now with your verdict."); }
+      try { els = await p.evaluate(SNAP, SNAP_MAX); } catch (e: any) { return text("page unavailable: " + String(e?.message || e).split("\n")[0].slice(0, 160) + " — call finish now with your verdict."); }
       const url = p.url(); let title = ""; try { title = await p.title(); } catch {}
       if (loginAttempted && !loginOk && url.includes(LOGIN_PATH)) {
         return text(`AUTO-LOGIN FAILED — you are on the login page and you do NOT have credentials to log in yourself. Do NOT fill or submit the login form. Call \`finish\` now with verdict "fail" and summary "automated login failed".`);
@@ -282,8 +318,23 @@ export default function (pi: ExtensionAPI) {
     async execute(_id, params: any) {
       const p = await ensurePage(); if (calls >= MAX_CALLS) return overBudgetMsg(); calls++;
       let result: string;
-      try { await p.click(`[data-qa-idx="${params.index}"]`, { timeout: 8000 }); result = "clicked #" + params.index; }
-      catch (e: any) { result = "click failed: " + String(e?.message || e).split("\n")[0].slice(0, 160); }
+      const sel = `[data-qa-idx="${params.index}"]`;
+      try { await p.click(sel, { timeout: 6000 }); result = "clicked #" + params.index; }
+      catch {
+        // Retry ladder for animated / portaled / pointer-intercepted elements (modals, wallet pickers):
+        // scroll+settle, then keyboard actuation, then a LOGGED force-click so a genuinely-obscured element
+        // still surfaces as a finding instead of silently passing.
+        try { await p.locator(sel).scrollIntoViewIfNeeded({ timeout: 1500 }); } catch {}
+        await p.waitForTimeout(400);
+        try { await p.click(sel, { timeout: 4000 }); result = "clicked #" + params.index + " (after scroll+settle)"; }
+        catch {
+          try { await p.locator(sel).focus({ timeout: 1500 }); await p.keyboard.press("Enter"); result = "activated #" + params.index + " via keyboard (pointer click was intercepted)"; }
+          catch {
+            try { await p.click(sel, { force: true, timeout: 3000 }); result = "FORCE-clicked #" + params.index + " — normal/scroll/keyboard clicks all failed, so this element is likely obscured or non-interactive (treat as a possible UX defect)"; }
+            catch (e: any) { result = "click failed after retries: " + String(e?.message || e).split("\n")[0].slice(0, 160); }
+          }
+        }
+      }
       await p.waitForTimeout(800);
       trace.push({ n: calls, action: { type: "click", index: params.index }, observation: "", result });
       return text(result + drainErrors() + budgetNote());
@@ -408,7 +459,7 @@ export default function (pi: ExtensionAPI) {
         // fetch from INSIDE the page → inherits the app origin + auth. Prefer the sniffed header; else read a
         // bearer token from localStorage (configured key first, then the Supabase default shape). Bearer is
         // attached ONLY when allowAuth (trusted destination); cookies (credentials:include) are origin-scoped anyway.
-        res = await p.evaluate(async ({ url, method, body, auth, storageKey, allowAuth }: any) => {
+        res = await p.evaluate(async ({ url, method, body, auth, storageKey, allowAuth, readOnly }: any) => {
           let authHeader = allowAuth ? (auth || "") : "";
           if (!authHeader && allowAuth) {
             // Pull an access token out of common localStorage shapes (Supabase, Zustand-persist, plain JWT).
@@ -439,7 +490,7 @@ export default function (pi: ExtensionAPI) {
           const r = await fetch(url, { method, headers, body, credentials: "include", redirect: readOnly ? "manual" : "follow" });
           const t = await r.text();
           return { status: r.status, body: t.slice(0, 2500) };
-        }, { url, method, body, auth: capturedAuth, storageKey: AUTH_STORAGE_KEY, allowAuth });
+        }, { url, method, body, auth: capturedAuth, storageKey: AUTH_STORAGE_KEY, allowAuth, readOnly });
       } catch (e: any) { res = { status: 0, body: "request failed: " + (e?.message || e) }; }
       trace.push({ n: calls, action: { type: "api" }, observation: `${method} ${rawPath} → ${res.status}`, result: String(res.body).slice(0, 200) });
       return text(`API ${method} ${url} → HTTP ${res.status}\n${res.body}${budgetNote()}`);
