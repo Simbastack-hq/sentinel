@@ -248,6 +248,22 @@ if [ -n "$pre_cmd" ]; then
   fi
 fi
 
+# GROUND TRUTH FOR THE AGENT. A pre_cmd may drop $RUN_DIR/agent-context.md; if it exists we prepend it
+# to the engine prompt. This is the seam that lets an operator hand the agent facts it CANNOT get from
+# the app itself — on-chain balances, already-filed issue numbers, seeded fixture state.
+#
+# Why it matters: a browser agent testing a money app otherwise has only the UI as its oracle, so when
+# the UI is the broken thing it reasons from a broken instrument. Run 20260729-144507 reported "deposit
+# succeeded but the vault has no balance" (it did succeed — the agent read the wrong account) and
+# restated one backend misconfig as six separate findings. Both are oracle failures, not model failures.
+#
+# Capped: this rides in front of every prompt, so a runaway hook can't eat the context window.
+prerun_context=""
+if [ -f "$rd/agent-context.md" ]; then
+  prerun_context="$(head -c "${QA_CONTEXT_MAX:-8000}" "$rd/agent-context.md")"
+  echo "agent-context: injecting ${#prerun_context} chars of pre-run ground truth into the prompt"
+fi
+
 case "$engine" in
   flow)
     # Autonomous deep QA: recon the repo → derive critical business flows (cached per commit) → run each
@@ -298,7 +314,13 @@ EOF
       echo "▶ flow $((i+1))/$n: $fname  (${FLOW_ATTEMPTS:-2} attempt(s) — findings unioned)"
       read -r -d '' fprompt <<EOF
 You are an autonomous QA engineer executing ONE end-to-end test flow on a REAL web app you are already logged into. Drive it to completion and VERIFY the outcome on BOTH the UI and the BACKEND API.
-
+${prerun_context:+
+=== VERIFIED GROUND TRUTH (measured outside the app, before this run) ===
+$prerun_context
+Treat the block above as FACT — measured from the source of truth, not read from the app. Where the UI
+disagrees with it, the UI is wrong and that is a finding.
+=== END GROUND TRUTH ===
+}
 FLOW: $fname
 WHY IT MATTERS: $fwhy
 UI STEPS: $fui
@@ -342,7 +364,14 @@ EOF
     pilog="$rd/artifacts/pi-qa.jsonl"
     read -r -d '' qprompt <<EOF
 $goal
-
+${prerun_context:+
+=== VERIFIED GROUND TRUTH (measured outside the app, before this run) ===
+$prerun_context
+Treat the block above as FACT. It was measured directly from the source of truth, not read from the
+app. Where it disagrees with what the UI shows, the UI is wrong — that is a finding, and the block is
+the evidence for it. Never contradict these numbers on the strength of what a page rendered.
+=== END GROUND TRUTH ===
+}
 You are an autonomous QA tester driving a REAL web app through browser tools. Workflow:
 1) call browser_snapshot to see the page (URL, title, numbered interactive elements, and any errors)
 2) use browser_click / browser_type / browser_upload / browser_navigate / browser_scroll (by the element index) to exercise the goal
@@ -395,6 +424,41 @@ if [ ! -f "$rep" ]; then
   result error "driver produced no report" 0 "" false "$head"; exit 0
 fi
 
+# VERIFIER GATE (optional, qa.app.verify_cmd). A second, stronger model re-judges every finding the
+# driver produced BEFORE anything is filed. The driver is cheap and fast and does the mechanical
+# clicking well; deciding whether a finding is actually true is the expensive part, and that is the
+# only place it's worth paying for a frontier model.
+#
+# Contract: the hook gets RUN_DIR + QA_REPORT and writes $RUN_DIR/verify.json:
+#   {"verdicts":[{"index":0,"real":false,"reason":"..."}, ...]}
+# Anything it marks real:false is kept in the report (clearly marked) but NOT filed. A hook that
+# crashes, times out, or emits garbage leaves every finding unjudged — and unjudged findings are
+# treated as NOT verified, so the gate fails CLOSED: a broken verifier files nothing rather than
+# everything. That asymmetry is deliberate — a missed bug costs a day, a wrong issue costs trust.
+verify_cmd="$(t_app "$TARGET" verify_cmd)"
+verified_gate=0
+if [ -n "$verify_cmd" ] && [ "$(jq -r '.bugs | length' "$rep" 2>/dev/null)" -gt 0 ] 2>/dev/null; then
+  verified_gate=1
+  echo "verify_cmd: $verify_cmd"
+  ( cd "$path" && RUN_DIR="$rd" QA_REPORT="$rep" QA_BASE="$qa_base" QA_API_BASE="$api_base" \
+    run_to "${VERIFY_TIMEOUT:-900}" bash -lc "$verify_cmd" ) >>"$rd/run.log" 2>&1 \
+    || echo "warn: verify_cmd exited nonzero — findings stay unverified and will NOT be filed"
+  if jq -e '.verdicts | type == "array"' "$rd/verify.json" >/dev/null 2>&1; then
+    tmp="$(mktemp)"
+    # Merge verdicts onto the findings by index, so the report and the filing loop read one file.
+    jq --slurpfile vf "$rd/verify.json" '
+      ($vf[0].verdicts // []) as $v
+      | .bugs = (.bugs | to_entries | map(
+          .key as $i | .value
+          + ( ($v | map(select(.index == $i)) | .[0]) // {} )
+        ))' "$rep" > "$tmp" 2>/dev/null && mv "$tmp" "$rep"
+    kept="$(jq -r '[.bugs[] | select(.real == true)] | length' "$rep" 2>/dev/null || echo 0)"
+    echo "verifier: $kept of $(jq -r '.bugs|length' "$rep") finding(s) confirmed"
+  else
+    echo "warn: verify_cmd produced no usable verify.json — no finding will be filed this run"
+  fi
+fi
+
 # UI/UX review (vision via mimo-v2-omni) over the captured screens — the design/usability lens the
 # DOM-based functional QA can't see (visual hierarchy, spacing, contrast/WCAG, typography, states).
 uiux_count=0
@@ -420,7 +484,14 @@ case "$verdict" in pass) v=pass;; fail) v=fail;; *) v=issues;; esac
     jq -r '.flows[] | "- **\(.name)** → **\(.verdict)** (\(.bugs) bugs) — \(.summary[0:200])"' "$qadir/flows.json" 2>/dev/null
   fi
   echo; echo "## Bugs"
-  jq -r '.bugs[] | "- **[\(.severity)]** \(.desc)"' "$rep" 2>/dev/null || echo "_none_"
+  if [ "$verified_gate" = 1 ]; then
+    # Show the verifier's call inline. A refuted finding stays visible — hiding it would lose the
+    # evidence that the driver is drifting, which is the thing worth watching.
+    jq -r '.bugs[] | "- \(if .real == true then "✅ CONFIRMED" elif .real == false then "❌ REFUTED" else "⬜ unjudged" end) **[\(.severity)]** \(.desc)\(if .reason then "\n  - _verifier: \(.reason)_" else "" end)"' "$rep" 2>/dev/null || echo "_none_"
+  else
+    jq -r '.bugs[] | "- **[\(.severity)]** \(.desc)"' "$rep" 2>/dev/null || echo "_none_"
+  fi
+  [ -f "$rd/chain-diff.md" ] && { echo; echo "## Chain diff (measured, not inferred)"; cat "$rd/chain-diff.md"; }
   con="$(jq -r '.consoleErrors | length' "$rep" 2>/dev/null)"; [ -n "$con" ] && [ "$con" -eq "$con" ] 2>/dev/null || con=0
   net="$(jq -r '.failedRequests | length' "$rep" 2>/dev/null)"; [ -n "$net" ] && [ "$net" -eq "$net" ] 2>/dev/null || net=0
   echo; echo "## Signals"; echo "- console errors: $con  •  failed requests: $net"
@@ -488,7 +559,13 @@ _run \`${RUN_ID:-?}\` • verdict $v • $(date -u '+%Y-%m-%d %H:%MZ')_"
     else
       echo "warn: gh issue create failed for: $title"
     fi
-  done < <(jq -r '.bugs[] | [.severity, .desc] | @tsv' "$rep" 2>/dev/null)
+    # When a verifier ran, only findings it positively confirmed are filed. Unjudged counts as
+    # unconfirmed, so a verifier that died files nothing (see the gate above).
+  done < <(if [ "$verified_gate" = 1 ]; then
+             jq -r '.bugs[] | select(.real == true) | [.severity, .desc] | @tsv' "$rep" 2>/dev/null
+           else
+             jq -r '.bugs[] | [.severity, .desc] | @tsv' "$rep" 2>/dev/null
+           fi)
   if [ "$filed" -gt 0 ]; then
     { echo; echo "## Filed issues"; jq -r '.[]' <<<"$issue_urls" | sed 's/^/- /'; } >> "$rd/report.md"
     echo "filed $filed new issue(s) on $issues_repo"

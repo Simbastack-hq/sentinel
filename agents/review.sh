@@ -53,7 +53,8 @@ out="$rd/artifacts/review.out"; cost=""
 echo "engine=$REVIEW_ENGINE range=$range diff_chars=${#diff}"
 case "$REVIEW_ENGINE" in
   codex)
-    ( cd "$path" && run_to "$CMD_TIMEOUT" codex exec -s read-only -m "$CODEX_MODEL" "$prompt" ) > "$out" 2>>"$rd/run.log" || echo "warn: codex nonzero exit" ;;
+    ( cd "$path" && run_to "$CMD_TIMEOUT" codex exec -s read-only -m "$CODEX_MODEL" \
+        -c model_reasoning_effort="$CODEX_REASONING" "$prompt" ) > "$out" 2>>"$rd/run.log" || echo "warn: codex nonzero exit" ;;
   claude)
     ( cd "$path" && run_to "$CMD_TIMEOUT" claude -p "$prompt" --permission-mode plan --output-format json ) > "$rd/artifacts/claude.json" 2>>"$rd/run.log" || echo "warn: claude nonzero exit"
     jq -r '.result // empty' "$rd/artifacts/claude.json" > "$out" 2>/dev/null
