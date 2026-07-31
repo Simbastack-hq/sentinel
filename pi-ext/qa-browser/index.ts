@@ -40,7 +40,9 @@ let page: Page | null = null;
 const consoleErrors: string[] = [];
 const pageErrors: string[] = [];
 const failedRequests: string[] = [];
-const bugs: { severity: string; desc: string; call: number }[] = [];
+const bugs: { severity: string; desc: string; evidence?: string; confidence?: string; call: number }[] = [];
+const evidenceBounced = new Set<string>();
+let finishBounced = 0;
 const trace: any[] = [];
 let calls = 0;
 let seenErr = 0;
@@ -248,11 +250,15 @@ const text = (s: string) => ({ content: [{ type: "text" as const, text: s }], de
 // agent must call finish() (bounds cost + keeps each flow inside the wall-clock cap).
 const overBudgetMsg = () => text("STEP BUDGET EXHAUSTED — do NOT take more actions. Call finish() now with your verdict and a summary of what you found and what broke.");
 
+// Prose that reads like "I found defects". Used to catch a summary full of findings that were never
+// filed via report_bug — deliberately narrow, so a passing summary doesn't trip it.
+const BUG_PROSE = /(\bBUGS?\s*(FOUND|:)|❌|\bCRITICAL\b|\bis (?:completely )?broken\b|\bdoes not (?:work|render|exist|persist)\b|\bnever (?:renders|appears|updates)\b|\bcannot be (?:triggered|created|completed)\b|\bfails? to\b)/i;
+
 function writeReport() {
   if (reportWritten) return;
   reportWritten = true;
   const seen = new Set<string>(); const deduped: any[] = [];
-  for (const b of bugs) { const k = b.desc.toLowerCase().slice(0, 80); if (!seen.has(k)) { seen.add(k); deduped.push({ severity: b.severity, desc: b.desc, step: b.call }); } }
+  for (const b of bugs) { const k = b.desc.toLowerCase().slice(0, 80); if (!seen.has(k)) { seen.add(k); deduped.push({ severity: b.severity, desc: b.desc, evidence: b.evidence || "", confidence: b.confidence || "confirmed", step: b.call }); } }
   const rank: Record<string, number> = { critical: 3, high: 2, medium: 1, low: 0 };
   if (!verdict) verdict = deduped.some((b) => rank[b.severity] >= 2) ? "fail" : (deduped.length || pageErrors.length || consoleErrors.length || failedRequests.length) ? "issues" : "pass";
   if (!summary) summary = `${deduped.length} bug(s); ${consoleErrors.length} console error(s); ${failedRequests.length} failed request(s) across ${calls} tool call(s).`;
@@ -261,6 +267,9 @@ function writeReport() {
     steps: trace, bugs: deduped, consoleErrors, pageErrors, failedRequests,
     cost: "0", verdict, summary, model: process.env.QA_MODEL || "mimo-v2.5-pro",
     incomplete: false,
+    // True when the summary narrates defects that were never filed as findings — those are invisible
+    // downstream, so the merged report has to say so instead of reporting a confident zero.
+    reportingGap: !deduped.length && verdict !== "pass" && BUG_PROSE.test(summary),
   };
   try { fs.writeFileSync(path.join(OUT, "report.json"), JSON.stringify(report, null, 2)); } catch {}
   try { fs.writeFileSync(path.join(OUT, "report.html"), html(report)); } catch {}
@@ -406,14 +415,31 @@ export default function (pi: ExtensionAPI) {
 
   pi.registerTool({
     name: "report_bug", label: "Report bug",
-    description: "Record a real defect you found (broken UI, JS/console error, dead control, failed/stuck request, wrong content). Only real defects.",
+    description: "Record a real defect you OBSERVED (broken UI, JS/console error, dead control, failed/stuck request, wrong content). Requires the evidence you saw, and an honest confidence. Only real defects.",
     parameters: Type.Object({
-      severity: Type.String({ description: "low | medium | high | critical" }),
-      description: Type.String({ description: "concrete, specific bug description" }),
+      severity: Type.String({ description: "low | medium | high | critical (critical/high require confidence=confirmed)" }),
+      description: Type.String({ description: "the defect you observed — what is wrong, not why you think it is wrong" }),
+      evidence: Type.String({ description: "the concrete observation proving it: METHOD /path → status, the DOM text you saw, a console line, or the step number of a screenshot. For high/critical, also state the disconfirming check you ran and why the innocent explanation does not hold." }),
+      confidence: Type.String({ description: "confirmed = directly reproduced/observed. suspected = inferred, or reasoning from absence." }),
     }),
     async execute(_id, params: any) {
-      bugs.push({ severity: String(params.severity || "low").toLowerCase(), desc: String(params.description || "").slice(0, 300), call: calls });
-      return text(`recorded bug (${bugs.length} total)`);
+      const desc = String(params.description || "").slice(0, 300);
+      const evidence = String(params.evidence || "").trim().slice(0, 400);
+      let confidence = String(params.confidence || "").toLowerCase().startsWith("conf") ? "confirmed" : "suspected";
+      let severity = String(params.severity || "low").toLowerCase();
+      const key = desc.toLowerCase().slice(0, 80);
+
+      // Evidence is the whole point — a finding with none is the shape that produced this run's two
+      // false CRITICALs. Bounce it once; if the model insists, record it as suspected rather than
+      // deadlocking the run.
+      if (!evidence && !evidenceBounced.has(key)) {
+        evidenceBounced.add(key);
+        return text("REJECTED — no evidence given. Re-file this bug with `evidence` = the exact observation that proves it (METHOD /path → status code, the text you saw on the page, or a console line). If you cannot point at an observation you actually made, do not file it.");
+      }
+      // An inferred cause cannot be a critical. Downgrade rather than drop: the finding may still be real.
+      if (confidence !== "confirmed" && (severity === "critical" || severity === "high")) severity = "medium";
+      bugs.push({ severity, desc, evidence: evidence || "(none given)", confidence, call: calls });
+      return text(`recorded bug (${bugs.length} total)${confidence === "suspected" ? " — filed as SUSPECTED, so it will not be escalated; confirm it if you can" : ""}`);
     },
   });
 
@@ -505,8 +531,17 @@ export default function (pi: ExtensionAPI) {
       summary: Type.String(),
     }),
     async execute(_id, params: any) {
-      verdict = String(params.verdict || "").toLowerCase() || verdict;
-      summary = String(params.summary || "") || summary;
+      const v = String(params.verdict || "").toLowerCase() || verdict;
+      const s = String(params.summary || "") || summary;
+
+      // The prose-only-findings failure: an agent writes "❌ BUGS FOUND: 1. CRITICAL …" into the summary
+      // and never calls report_bug, so merge-flows sees zero bugs and the developer sees none. Observed
+      // on 3 of 4 flow attempts in one run. Bounce once, while there is still budget to file them.
+      if (!bugs.length && v !== "pass" && BUG_PROSE.test(s) && calls < MAX_CALLS && finishBounced < 1) {
+        finishBounced++;
+        return text("NOT FINISHED — your summary describes defects but you filed 0 via report_bug. The report is built ONLY from report_bug calls; everything in this summary is discarded. File each defect now with report_bug (severity, description, evidence, confidence), then call finish again.");
+      }
+      verdict = v; summary = s;
       writeReport();
       return text("QA report written. You may stop now.");
     },

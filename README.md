@@ -35,7 +35,8 @@ Point the `qa` agent at any web app with `engine: "flow"` and, **without you wri
 1. **Understands the product** — `recon` reads the repo's routes, API modules, services, and DB schema; Mimo derives the critical end-to-end business flows (cached per commit). *On a hotel PMS it independently produces flows like "Book → Check-in → Night Audit → Checkout", "Group Reservation", "Cancellation → availability release", "Payment → Invoice → Refund".*
 2. **Tests each flow deeply** — a Mimo + Playwright agent drives the UI **and** asserts the **backend** via a real authenticated `api_request` tool (it creates a reservation via the API, verifies it persisted, drives status transitions, checks the folio…).
 3. **Is reliable despite a non-deterministic agent** — each flow runs **N attempts** and findings are **unioned + deduped** (one attempt finds 0 bugs, another finds 5 → you get all 5).
-4. **Adds a UI/UX review** — every captured screen is graded by a vision model (`mimo-v2-omni`) on hierarchy, spacing, **contrast/WCAG**, typography, consistency, usability, and states.
+4. **Won't cry wolf** — the agent is handed the app's **real endpoint map** (mount prefixes resolved, so it can't invent a path, 404 itself, and declare a feature missing), and every finding needs `evidence` plus an honest `confidence`. `suspected` findings are shown but never escalated or filed as issues; `critical`/`high` require a confirmed observation *and* a disconfirming check. Findings that exist only in the agent's prose summary are caught rather than silently dropped.
+5. **Adds a UI/UX review** — every captured screen is graded by a vision model (`mimo-v2-omni`) on hierarchy, spacing, **contrast/WCAG**, typography, consistency, usability, and states.
 
 Output: one combined `report.html` + `report.md` with per-flow verdicts, a deduped **FE+BE bug list**, UI/UX findings, and per-attempt screenshot traces.
 
@@ -56,8 +57,8 @@ launchd ──(every 15 min)──▶ sentinel tick ──┐  single-flight loc
                   writes report.md + result.json → reports/ + ntfy push
 
 qa engine "flow":
-  recon.js (digest)  →  Mimo derives flows (cached)  →  for each flow:
-     N attempts × [ Mimo + Playwright + api_request, hard step cap ]  →  union/dedup
+  api-map.js (real endpoints) + recon.js (digest)  →  Mimo derives flows (cached)  →  for each flow:
+     N attempts × [ Mimo + Playwright + api_request, endpoint map, hard step cap ]  →  union/dedup
   →  UI/UX vision pass (mimo-v2-omni)  →  merge → combined report.html/json
 ```
 
@@ -229,7 +230,7 @@ The brain location is **global** (one brain for all targets): `BRAIN_PATH` (loca
 ## Repo layout
 
 ```
-bin/        sentinel (CLI) · recon.js · pi-ask.js · qa-drive.js · mimo-vision.js · uiux-review.js · merge-flows.js · render-report.js
+bin/        sentinel (CLI) · recon.js · api-map.js · pi-ask.js · qa-drive.js · mimo-vision.js · uiux-review.js · merge-flows.js · render-report.js
 agents/     review.sh · docs-sync.sh · qa.sh · brain-sync.sh
 examples/   ready-to-copy targets.json registries + brain-repo scaffold (see examples/README.md)
 lib/        common.sh  (shared: env, cadence, locking, accessors)

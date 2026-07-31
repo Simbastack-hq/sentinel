@@ -294,12 +294,18 @@ case "$engine" in
 You are a senior QA engineer. From this codebase structure, infer the product and derive the critical END-TO-END business test flows a thorough human QA would run — the real workflows, their state transitions, and edge cases. Output ONLY JSON:
 {"product":"<one line>","domain":"<...>","critical_flows":[{"name":"<short>","priority":"high|medium|low","why":"<...>","ui_steps":["..."],"backend_checks":["what to verify via the API"],"edge_cases":["..."]}]}
 Give 6-9 critical_flows, highest priority first.
+ui_steps, backend_checks and edge_cases MUST each be a JSON array of strings — never a bare string, even for a single item.
+Use only endpoints that appear in API ENDPOINTS below; do not invent paths.
 
 $digest
 EOF
       run_to 220 node "$SENTINEL_HOME/bin/pi-ask.js" --provider "$QA_PROVIDER" --model "$QA_MODEL" --thinking "$QA_THINKING" --timeout 200 "$dprompt" > "$plan.raw" 2>>"$rd/run.log"
       python3 -c "import sys,json; t=open('$plan.raw').read(); i=t.find('{'); j=t.rfind('}'); s=t[i:j+1] if (i>=0 and j>i) else '{}'; json.loads(s); open('$plan','w').write(s)" 2>>"$rd/run.log" || echo '{"critical_flows":[]}' > "$plan"
     fi
+    # Real endpoints, prefix-resolved, handed to EVERY flow agent. Without this the agent guesses paths,
+    # collects 404s from routes that never existed, and reports "feature missing" as a CRITICAL finding.
+    endpoint_map="$(node "$SENTINEL_HOME/bin/api-map.js" "$path" --max "${ENDPOINT_MAX:-160}" 2>>"$rd/run.log")"
+    [ -n "$endpoint_map" ] && echo "endpoint map: $(printf '%s\n' "$endpoint_map" | grep -c '^[A-Z]') routes extracted"
     nflows="$(jq -r '.critical_flows|length' "$plan" 2>/dev/null || echo 0)"
     maxflows="${FLOW_MAX:-2}"; n=$(( nflows < maxflows ? nflows : maxflows ))
     echo "plan: $(jq -r '.product // "?"' "$plan") — deep-testing top $n of $nflows flows"
@@ -308,9 +314,13 @@ EOF
     while [ "$i" -lt "$n" ]; do
       fname="$(jq -r ".critical_flows[$i].name" "$plan")"
       fwhy="$(jq -r ".critical_flows[$i].why // \"\"" "$plan")"
-      fui="$(jq -r ".critical_flows[$i].ui_steps // [] | join(\" → \")" "$plan")"
-      fbe="$(jq -r ".critical_flows[$i].backend_checks // [] | join(\" ; \")" "$plan")"
-      fec="$(jq -r ".critical_flows[$i].edge_cases // [] | join(\" ; \")" "$plan")"
+      # The model sometimes emits a STRING where the schema says array (observed: backend_checks:
+      # "POST /night-audit ..."). `join` then dies with "Cannot iterate over string" and the field is
+      # silently dropped from the prompt — the agent loses half its checklist and never knows. Coerce.
+      as_list='(if . == null then [] elif type == "array" then . else [tostring] end)'
+      fui="$(jq -r ".critical_flows[$i].ui_steps | $as_list | join(\" → \")" "$plan" 2>/dev/null)"
+      fbe="$(jq -r ".critical_flows[$i].backend_checks | $as_list | join(\" ; \")" "$plan" 2>/dev/null)"
+      fec="$(jq -r ".critical_flows[$i].edge_cases | $as_list | join(\" ; \")" "$plan" 2>/dev/null)"
       echo "▶ flow $((i+1))/$n: $fname  (${FLOW_ATTEMPTS:-2} attempt(s) — findings unioned)"
       read -r -d '' fprompt <<EOF
 You are an autonomous QA engineer executing ONE end-to-end test flow on a REAL web app you are already logged into. Drive it to completion and VERIFY the outcome on BOTH the UI and the BACKEND API.
@@ -327,11 +337,28 @@ UI STEPS: $fui
 BACKEND CHECKS: $fbe
 EDGE CASES TO PROBE: $fec
 
+ENDPOINT MAP — the app's REAL routes, extracted from its source. These are the only paths that exist:
+${endpoint_map:-(unavailable — probe carefully and do not assume a 404 means a feature is missing)}
+
+RULES ON PATHS: use the EXACT paths above. If a path is not in the map, it does not exist — do not try variants of it. A 404 from a path YOU invented is evidence about your guess, not about the product, and reporting it as a missing feature is a FALSE finding. Never spend more than one call on a path that is not in the map.
+
+EVIDENCE DISCIPLINE — your report is judged on this:
+- Report what you OBSERVED. Do NOT assert a CAUSE you have not verified. "X is broken" needs the request/response, status code, DOM text, or console line that shows it.
+- Separate the two: 'description' = the defect you observed. 'evidence' = the concrete observation proving it (method+path+status, the text you saw, the step number of a screenshot).
+- 'confidence' = "confirmed" only if you directly reproduced or observed the failure. If you are inferring a cause or reasoning from absence, it is "suspected" — say what would confirm it.
+- severity critical/high REQUIRES confidence=confirmed. An inferred cause is at most medium.
+- Absence of a UI control, or a path you could not find, is "suspected" at best — you cannot see the whole app.
+- If two of your own observations conflict, re-observe. The later fresh observation wins, not the earlier assumption.
+- Do NOT attribute a defect to a specific validation, function, or code path — you cannot see the source. Describe the OBSERVABLE state ("two reservations are CHECKED_IN on room X") and let the developer locate the cause. "Endpoint Y does not validate Z" is a claim about code you have not read.
+- BEFORE filing anything high/critical, spend ONE call on a DISCONFIRMING check — actively hunt for the innocent explanation, then put its result in 'evidence'. Fetch the records and compare the actual field values (dates, ranges, statuses, ids) rather than trusting the shape of what you saw; re-read the ENDPOINT MAP before claiming something is absent. Two records sharing a resource is not a conflict until you have compared their date ranges. If the innocent explanation holds, do not file.
+
+HOW YOUR REPORT IS BUILT: only report_bug calls become findings. Anything that appears solely in your finish summary is DISCARDED and the developer never sees it. File each defect with report_bug the moment you find it — do not save them for the summary.
+
 Work the BACKEND CHECKS and EDGE CASES above as a MANDATORY CHECKLIST — attempt every one and report its result. Be SKEPTICAL: assume something is broken until you have proven it works.
 Method: perform each UI step (click/type/upload/navigate). After EVERY create or update, do BOTH:
   (a) api_request to confirm the backend truly persisted it (record fields, status transitions, availability/inventory counts), and
   (b) browser_snapshot the views that should reflect it (calendar, list, detail) to confirm the UI actually shows the change.
-A mismatch between what the API/backend holds and what the UI shows is a BUG. A status/state the API did NOT actually update (even if the UI looks fine) is a BUG. Missing endpoints, wrong data, pages that don't render, and mishandled edge cases are bugs. Call report_bug (severity low|medium|high|critical) for each.
+A mismatch between what the API/backend holds and what the UI shows is a BUG. A status/state the API did NOT actually update (even if the UI looks fine) is a BUG. Wrong data, pages that don't render, endpoints in the map that fail, and mishandled edge cases are bugs. Call report_bug (severity, description, evidence, confidence) for each.
 Do NOT conclude the flow "works" without having run each backend check AND seen the UI update consistently. When the checklist is done (or you are blocked), call finish with verdict pass|issues|fail and a summary that states the result of each backend check and edge case.
 Stay within this app's origin. Be thorough, skeptical, and persistent — this is a DEEP flow test, not a click-around.
 EOF
@@ -481,16 +508,20 @@ case "$verdict" in pass) v=pass;; fail) v=fail;; *) v=issues;; esac
   if [ -f "$qadir/flows.json" ]; then
     echo; echo "## Flow tests (autonomous, deep — frontend + backend)"
     echo "_$(jq -r '.product // "product"' "$qadir/flows.json")_"
-    jq -r '.flows[] | "- **\(.name)** → **\(.verdict)** (\(.bugs) bugs) — \(.summary[0:200])"' "$qadir/flows.json" 2>/dev/null
+    jq -r '.flows[] | "- **\(.name)** → **\(.verdict)** (\(.bugs) bugs\(if .reportingGap then ", ⚠️ described defects but filed none — read its summary" else "" end)) — \(.summary[0:200])"' "$qadir/flows.json" 2>/dev/null
+  fi
+  gaps="$(jq -r '(.reportingGaps // []) | length' "$rep" 2>/dev/null)"; [ -n "$gaps" ] && [ "$gaps" -eq "$gaps" ] 2>/dev/null || gaps=0
+  if [ "$gaps" -gt 0 ]; then
+    echo; echo "> ⚠️ **Under-reported:** $gaps flow(s) narrated defects in their summary without filing them, so the bug count below undercounts. Flows: $(jq -r '.reportingGaps | join(", ")' "$rep" 2>/dev/null)"
   fi
   echo; echo "## Bugs"
-  if [ "$verified_gate" = 1 ]; then
-    # Show the verifier's call inline. A refuted finding stays visible — hiding it would lose the
-    # evidence that the driver is drifting, which is the thing worth watching.
-    jq -r '.bugs[] | "- \(if .real == true then "✅ CONFIRMED" elif .real == false then "❌ REFUTED" else "⬜ unjudged" end) **[\(.severity)]** \(.desc)\(if .reason then "\n  - _verifier: \(.reason)_" else "" end)"' "$rep" 2>/dev/null || echo "_none_"
-  else
-    jq -r '.bugs[] | "- **[\(.severity)]** \(.desc)"' "$rep" 2>/dev/null || echo "_none_"
-  fi
+  # Two independent judgements, both shown. The driver's own `confidence` says whether IT observed the
+  # failure or inferred it; the verifier's `real` is a second, stronger model's call. A refuted finding
+  # stays visible — hiding it would lose the evidence that the driver is drifting, which is the thing
+  # worth watching. The verifier column only appears when a gate actually ran.
+  jq -r --argjson gate "${verified_gate:-0}" '.bugs[]
+    | (if $gate == 1 then (if .real == true then "✅ CONFIRMED " elif .real == false then "❌ REFUTED " else "⬜ unjudged " end) else "" end) as $vg
+    | "- \($vg)**[\(.severity)]**\(if (.confidence // "confirmed") != "confirmed" then " _(suspected)_" else "" end) \(.desc)\(if (.evidence // "") != "" then "\n  - evidence: \(.evidence)" else "" end)\(if .reason then "\n  - _verifier: \(.reason)_" else "" end)"' "$rep" 2>/dev/null || echo "_none_"
   [ -f "$rd/chain-diff.md" ] && { echo; echo "## Chain diff (measured, not inferred)"; cat "$rd/chain-diff.md"; }
   con="$(jq -r '.consoleErrors | length' "$rep" 2>/dev/null)"; [ -n "$con" ] && [ "$con" -eq "$con" ] 2>/dev/null || con=0
   net="$(jq -r '.failedRequests | length' "$rep" 2>/dev/null)"; [ -n "$net" ] && [ "$net" -eq "$net" ] 2>/dev/null || net=0
@@ -559,12 +590,15 @@ _run \`${RUN_ID:-?}\` • verdict $v • $(date -u '+%Y-%m-%d %H:%MZ')_"
     else
       echo "warn: gh issue create failed for: $title"
     fi
-    # When a verifier ran, only findings it positively confirmed are filed. Unjudged counts as
-    # unconfirmed, so a verifier that died files nothing (see the gate above).
+    # TWO gates, composed, both fail-closed. (1) The driver must have OBSERVED the failure rather than
+    # inferred it — a `suspected` finding is an inference, and filing inferences is how a QA agent burns
+    # a team's trust. (2) When a verifier ran, it must have positively confirmed the finding; unjudged
+    # counts as unconfirmed, so a verifier that died files nothing (see the gate above).
+    # Either gate alone can block a filing; neither can force one. Blocked findings stay in the report.
   done < <(if [ "$verified_gate" = 1 ]; then
-             jq -r '.bugs[] | select(.real == true) | [.severity, .desc] | @tsv' "$rep" 2>/dev/null
+             jq -r '.bugs[] | select(.real == true and (.confidence // "confirmed") == "confirmed") | [.severity, .desc] | @tsv' "$rep" 2>/dev/null
            else
-             jq -r '.bugs[] | [.severity, .desc] | @tsv' "$rep" 2>/dev/null
+             jq -r '.bugs[] | select((.confidence // "confirmed") == "confirmed") | [.severity, .desc] | @tsv' "$rep" 2>/dev/null
            fi)
   if [ "$filed" -gt 0 ]; then
     { echo; echo "## Filed issues"; jq -r '.[]' <<<"$issue_urls" | sed 's/^/- /'; } >> "$rd/report.md"

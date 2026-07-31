@@ -21,7 +21,8 @@ for (const f of (rep.flows || [])) h.push(`<tr><td>${esc(f.name)}</td><td><span 
 h.push('</table>');
 
 h.push('<h2>Bugs — frontend + backend (' + (rep.bugs || []).length + ')</h2>');
-if ((rep.bugs || []).length) { h.push('<ul>'); for (const b of rep.bugs) h.push(`<li><span class="sev ${esc((b.severity || 'low').toLowerCase())}">[${esc(b.severity)}]</span> ${b.flow ? '<span class="muted">(' + esc(b.flow) + ')</span> ' : ''}${esc(b.desc)}</li>`); h.push('</ul>'); }
+if ((rep.reportingGaps || []).length) h.push(`<p class="muted">⚠️ under-reported: ${esc(rep.reportingGaps.join(', '))} described defects without filing them — read those flow summaries.</p>`);
+if ((rep.bugs || []).length) { h.push('<ul>'); for (const b of rep.bugs) h.push(`<li><span class="sev ${esc((b.severity || 'low').toLowerCase())}">[${esc(b.severity)}]</span> ${(b.confidence || 'confirmed') !== 'confirmed' ? '<span class="muted">(suspected)</span> ' : ''}${b.flow ? '<span class="muted">(' + esc(b.flow) + ')</span> ' : ''}${esc(b.desc)}${b.evidence ? '<br><span class="muted">evidence: ' + esc(b.evidence) + '</span>' : ''}</li>`); h.push('</ul>'); }
 else h.push('<p class="muted">None.</p>');
 
 if ((ui.screens || []).some((s) => (s.findings || []).length)) {

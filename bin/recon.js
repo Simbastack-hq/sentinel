@@ -21,7 +21,11 @@ const routeDirs = uniq(sh(`find . -path '*/node_modules/*' -prune -o -type d -na
 let apiModules = [];
 for (const d of routeDirs) apiModules.push(...uniq(sh(`ls '${d}' 2>/dev/null`), 120).map((f) => f.replace(/\.(ts|js)$/, '')));
 apiModules = [...new Set(apiModules)].filter((x) => x && !/\.(map|d)$/.test(x)).slice(0, 80);
-const apiRoutes = uniq(sh(`grep -rhoE "(router|app|fastify|route)\\.(get|post|put|patch|delete)\\(['\\"][^'\\" ]+" . --include=*.ts --include=*.js 2>/dev/null | grep -v node_modules | sed -E "s/.*(get|post|put|patch|delete)\\(['\\"]/\\U\\1\\E /"`), 60);
+// Real endpoints WITH their mount prefix resolved. A bare `POST /trigger` is uncallable and makes an
+// agent guess paths until it wrongly concludes the feature is missing — see bin/api-map.js.
+const apiRoutes = (() => {
+  try { return require('./api-map.js').buildMap(repo, 120).endpoints; } catch { return []; }
+})();
 
 // Services + jobs/workers (reveal background business logic).
 const svcDirs = uniq(sh(`find . -path '*/node_modules/*' -prune -o -type d \\( -name services -o -name workers -o -name jobs -o -name queues \\) -print 2>/dev/null`), 12);
@@ -36,7 +40,7 @@ const out = [];
 out.push('FRONTEND ROUTES: ' + (fe.join('  ') || '(none found)'));
 out.push('');
 out.push('BACKEND API MODULES: ' + (apiModules.join('  ') || '(none found)'));
-if (apiRoutes.length) out.push('API ENDPOINTS (sample): ' + apiRoutes.join('  '));
+if (apiRoutes.length) out.push('API ENDPOINTS (real, prefix-resolved):\n  ' + apiRoutes.join('\n  '));
 out.push('');
 out.push('BACKEND SERVICES/WORKERS: ' + (services.join('  ') || '(none found)'));
 out.push('');

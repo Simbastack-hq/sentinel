@@ -18,11 +18,12 @@ const bugs = [], steps = [], con = [], pe = [], fr = [], flows = []; let cost = 
 const seenBug = new Set();
 Object.keys(byFlow).map(Number).sort((a, b) => a - b).forEach((idx) => {
   const name = flowNames[idx] || ('flow ' + idx);
-  let verdict = 'pass', bestSummary = '', attempts = 0, flowBugCount = 0;
+  let verdict = 'pass', bestSummary = '', attempts = 0, flowBugCount = 0, gap = false;
   for (const d of byFlow[idx].sort()) {
     const rp = path.join(dir, d, 'report.json'); if (!fs.existsSync(rp)) continue;
     let r; try { r = JSON.parse(fs.readFileSync(rp, 'utf8')); } catch { continue; }
     attempts++;
+    if (r.reportingGap) gap = true;
     if ((rank[r.verdict] || 1) > (rank[verdict] || 0)) verdict = r.verdict;
     if ((r.summary || '').length > bestSummary.length) bestSummary = r.summary || '';
     for (const b of (r.bugs || [])) { const k = (name + ':' + (b.desc || '')).toLowerCase().slice(0, 110); if (!seenBug.has(k)) { seenBug.add(k); bugs.push({ ...b, flow: name }); flowBugCount++; } }
@@ -30,7 +31,9 @@ Object.keys(byFlow).map(Number).sort((a, b) => a - b).forEach((idx) => {
     con.push(...(r.consoleErrors || [])); pe.push(...(r.pageErrors || [])); fr.push(...(r.failedRequests || []));
     cost += parseFloat(r.cost || 0) || 0;
   }
-  flows.push({ name, verdict: attempts ? verdict : 'error', bugs: flowBugCount, attempts, summary: bestSummary || 'no report (agent produced nothing)' });
+  // A flow that narrated defects but filed none is NOT a clean flow — mark it so the report can say
+  // "0 filed, see summary" instead of implying the flow was clean.
+  flows.push({ name, verdict: attempts ? verdict : 'error', bugs: flowBugCount, attempts, reportingGap: gap && !flowBugCount, summary: bestSummary || 'no report (agent produced nothing)' });
 });
 
 const overall = flows.some((f) => f.verdict === 'fail' || f.verdict === 'error') ? 'fail'
@@ -41,7 +44,10 @@ const combined = {
   verdict: overall, summary: flows.map((f) => `${f.name} → ${f.verdict}${f.attempts > 1 ? ` (${f.attempts}x)` : ''}`).join('  •  '),
   bugs, steps, consoleErrors: [...new Set(con)], pageErrors: pe, failedRequests: [...new Set(fr)],
   cost: cost ? cost.toFixed(4) : '0', model: 'mimo-v2.5-pro', flows,
+  reportingGaps: flows.filter((f) => f.reportingGap).map((f) => f.name),
+  suspected: bugs.filter((b) => (b.confidence || 'confirmed') !== 'confirmed').length,
 };
 fs.writeFileSync(path.join(dir, 'report.json'), JSON.stringify(combined, null, 2));
 fs.writeFileSync(path.join(dir, 'flows.json'), JSON.stringify({ product: plan.product, domain: plan.domain, flows }, null, 2));
-console.log(`merged ${flows.length} flows (${dirs.length} attempts) → ${overall}, ${bugs.length} unique bugs`);
+console.log(`merged ${flows.length} flows (${dirs.length} attempts) → ${overall}, ${bugs.length} unique bugs (${combined.suspected} suspected)`);
+if (combined.reportingGaps.length) console.log(`warn: ${combined.reportingGaps.length} flow(s) described defects but filed none: ${combined.reportingGaps.join(', ')}`);

@@ -71,7 +71,8 @@ A pi extension (`pi-ext/qa-browser/`) registers Playwright-backed tools; **Mimo 
 The headline. Pipeline:
 
 ```
-recon.js <repo>  →  structural digest (FE routes, API modules, services, DB entities)
+api-map.js <repo>  →  real endpoints with mount prefixes resolved (METHOD /full/path)
+recon.js <repo>  →  structural digest (FE routes, endpoint map, services, DB entities)
        │
        ▼
 Mimo (pi-ask) derives critical_flows JSON  →  cached in var/plans/<target>-<sha>.json
@@ -80,6 +81,7 @@ Mimo (pi-ask) derives critical_flows JSON  →  cached in var/plans/<target>-<sh
    FLOW_ATTEMPTS × [  pi + qa-browser extension, tools:
                         browser_snapshot/click/type/upload/navigate/scroll,
                         api_request (BACKEND assertions), report_bug, finish
+                      prompt carries the ENDPOINT MAP + evidence discipline
                       hard step cap = FLOW_STEPS (action tools refuse past it → must finish)  ]
        │
        ▼
@@ -97,6 +99,9 @@ render-report.js  →  one combined report.html (flows, FE+BE bugs, UI/UX, links
 - **`api_request` tool:** runs `fetch` *inside the page*, reusing the frontend's own captured `Authorization` header — so it asserts real backend state (record fields, status transitions, availability) with the logged-in session. This is how it catches backend-only bugs and UI↔backend mismatches.
 - **Multi-attempt union:** a single autonomous run is non-deterministic (one attempt may find 0 bugs, another 5). Running each flow N times and unioning findings turns that variance into reliable coverage.
 - **Hard step cap:** a soft "you're over budget" nudge gets ignored; the action tools physically refuse past `FLOW_STEPS`, bounding cost and wall-clock.
+- **Endpoint map in the prompt (`api-map.js`):** an agent that doesn't know the app's real routes invents them, collects 404s, and reports "this feature doesn't exist" as a CRITICAL. Observed on a real karibukit run: ~30 steps spent guessing `/api/night-audit/{run,execute,start,prepare,…}` while `POST /api/night-audit/trigger` existed and a sibling attempt had already called it successfully. Resolving `app.route('/api/x', xRoute)` against the handlers in `xRoute`'s module makes the real paths a prompt input, so "not in the map" is a fact rather than a guess.
+- **Evidence discipline:** every finding carries `evidence` (the observation) and `confidence` (`confirmed` = reproduced/observed, `suspected` = inferred). `report_bug` rejects a finding with no evidence once; `critical`/`high` are auto-downgraded to `medium` when merely suspected; only **confirmed** findings are filed to the issue tracker. Agents reliably observe correctly and then narrate a *cause* they never checked — on the same run, "two reservations CHECKED_IN on one room" (true) became "check-in does not validate occupancy" (false; it does, and the two stays didn't overlap — a back-to-back turnover). Hence also the rule to describe observable state rather than attribute defects to unread code, and to spend one call on a **disconfirming check** before filing anything high/critical.
+- **`finish` refuses to discard prose findings:** the agent would write "❌ BUGS FOUND: 1. CRITICAL …" into its summary and never call `report_bug` — the report is built from `report_bug` calls, so those findings vanished. Seen on 3 of 4 attempts in one run (report said "1 finding"; the summaries described seven). `finish` now bounces once while budget remains, and any remaining gap is flagged as `reportingGaps` in the merged report instead of shown as a clean zero.
 
 ## 5. Login & UI/UX vision
 
