@@ -20,6 +20,15 @@ const MAX_CALLS = parseInt(process.env.QA_MAX_TOOLCALLS || "30", 10);
 // default cap — e.g. a trading page whose "Close position" button sits below 40 other controls is
 // invisible to the agent, so it can never close what it opened. Raise per-target via app.snap_max.
 const SNAP_MAX = Math.max(10, parseInt(process.env.QA_SNAP_MAX || "40", 10) || 40);
+// How much VISIBLE PAGE TEXT each snapshot returns alongside the element list. 0 disables it.
+//
+// Until 2026-08-03 a snapshot contained interactive elements ONLY — no table cells, no headings, no
+// rendered values. The agent could see a "Price" column header only if it happened to be a button,
+// and could never see the prices themselves. It reported what it could not see as absent, which
+// manufactured a whole class of confident false positives: "Markets page shows no numeric values"
+// (screenshot: every column populated), "vault list shows — for all columns", "Portfolio Overview
+// shows no numbers", "Signal Metrics render no values". Every one of those was the tool, not the app.
+const TEXT_MAX = Math.max(0, parseInt(process.env.QA_TEXT_MAX || "3000", 10) || 0);
 const HEADLESS = process.env.QA_HEADLESS !== "0";
 // Optional login. Credentials come from env (set by qa.sh from config/sentinel.env); used ONLY to fill the
 // form via Playwright — never sent to the model, never written to the trace/report/logs.
@@ -104,6 +113,38 @@ function SNAP(maxEls: number) {
     i++;
   }
   return out;
+}
+
+// Visible text of the page, as a user would read it. Deliberately separate from SNAP: SNAP's job is to
+// produce a stable click index, and mixing prose into it would shift indices as content re-renders.
+// Skips script/style/svg, collapses whitespace, and drops the chrome that repeats on every page so the
+// budget goes to the content under test rather than the nav bar.
+function SNAP_TEXT(maxChars: number) {
+  if (maxChars <= 0) return "";
+  const skip = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "SVG", "PATH", "HEAD"]);
+  const parts: string[] = [];
+  const walk = (node: Node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const t = (node.textContent || "").replace(/\s+/g, " ").trim();
+      if (t) parts.push(t);
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const el = node as HTMLElement;
+    if (skip.has(el.tagName)) return;
+    const st = getComputedStyle(el);
+    if (st.display === "none" || st.visibility === "hidden" || st.opacity === "0") return;
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) return;
+    for (const c of Array.from(el.childNodes)) walk(c);
+  };
+  walk(document.body);
+  // De-dupe consecutive repeats (icon labels and aria text often double up) without reordering.
+  const dedup: string[] = [];
+  for (const p of parts) if (p !== dedup[dedup.length - 1]) dedup.push(p);
+  let s = dedup.join(" | ");
+  if (s.length > maxChars) s = s.slice(0, maxChars) + " …[truncated]";
+  return s;
 }
 
 async function ensurePage(): Promise<Page> {
@@ -293,7 +334,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "browser_snapshot",
     label: "Snapshot",
-    description: "Observe the page. Returns URL, title, a numbered list of interactive elements (use the number as 'index' for click/type/upload), and any new console/page/network errors since the last snapshot. Call this first, and again after each action to see what changed.",
+    description: "Observe the page. Returns URL, title, a numbered list of interactive elements (use the number as 'index' for click/type/upload), the VISIBLE TEXT of the page as a user reads it, and any new console/page/network errors since the last snapshot. Call this first, and again after each action to see what changed.",
     parameters: Type.Object({}),
     async execute() {
       const p = await ensurePage(); if (calls >= MAX_CALLS) return overBudgetMsg(); calls++;
@@ -307,7 +348,14 @@ export default function (pi: ExtensionAPI) {
       try { await p.screenshot({ path: path.join(OUT, shot) }); } catch {}
       trace.push({ n: calls, url, action: { type: "snapshot" }, observation: `${url} — ${title}`, result: `${els.length} elements`, screenshot: shot });
       const list = els.map((e) => `${e.idx}) <${e.tag}${e.type ? " type=" + e.type : ""}> ${e.text}`).join("\n") || "(no interactive elements)";
-      return text(`URL: ${url}\nTITLE: ${title}\nELEMENTS:\n${list}${drainErrors()}${budgetNote()}`);
+      let pageText = "";
+      try { pageText = await p.evaluate(SNAP_TEXT, TEXT_MAX); } catch {}
+      // The element list is a click index, NOT evidence of what rendered. Say so explicitly: the agent
+      // used to read "absent from ELEMENTS" as "absent from the page" and file it as a bug.
+      const textBlock = TEXT_MAX > 0
+        ? `\nPAGE TEXT (what a user actually sees — judge rendered values from THIS, never from the ELEMENTS list, which only indexes clickable things):\n${pageText || "(no visible text)"}`
+        : "";
+      return text(`URL: ${url}\nTITLE: ${title}\nELEMENTS:\n${list}${textBlock}${drainErrors()}${budgetNote()}`);
     },
   });
 
