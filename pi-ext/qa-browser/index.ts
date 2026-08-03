@@ -29,6 +29,11 @@ const SNAP_MAX = Math.max(10, parseInt(process.env.QA_SNAP_MAX || "40", 10) || 4
 // (screenshot: every column populated), "vault list shows — for all columns", "Portfolio Overview
 // shows no numbers", "Signal Metrics render no values". Every one of those was the tool, not the app.
 const TEXT_MAX = Math.max(0, parseInt(process.env.QA_TEXT_MAX || "3000", 10) || 0);
+// Send the screenshot to the driver with every snapshot, so it TESTS from what a user sees rather than
+// from a DOM description. Requires a multimodal QA_MODEL (set 0 for a text-only one, or the provider
+// will reject every call). Screenshots were captured from the start but only ever written to disk for
+// the human report — the model driving the browser had never once seen the page it was driving.
+const VISION_DRIVER = process.env.QA_VISION_DRIVER !== "0";
 const HEADLESS = process.env.QA_HEADLESS !== "0";
 // Optional login. Credentials come from env (set by qa.sh from config/sentinel.env); used ONLY to fill the
 // form via Playwright — never sent to the model, never written to the trace/report/logs.
@@ -60,6 +65,7 @@ let reportWritten = false;
 let loginAttempted = false;
 let loginOk = true; // stays true when no login is configured
 let capturedAuth = ""; // the real Authorization header the frontend sends to its API — reused for api_request
+let openedTabNote = ""; // set when the app opens a new tab, surfaced once on the next snapshot
 
 // Tag visible interactive elements (+ always file inputs) and return an indexed list.
 // Mirrors v1 bin/qa-drive.js SNAP. Runs in the browser context.
@@ -158,6 +164,23 @@ async function ensurePage(): Promise<Page> {
   page.on("requestfailed", (r) => { if (failedRequests.length < 400) { const f = r.failure(); failedRequests.push(`${r.method()} ${r.url().slice(0, 140)} — ${f ? f.errorText : "failed"}`); } });
   // Sniff the frontend's own API auth so api_request can authenticate exactly like the app does.
   page.on("request", (r) => { try { const a = r.headers()["authorization"]; if (a && AUTH_URL_RE.test(r.url())) capturedAuth = a; } catch {} });
+  // FOLLOW NEW TABS. `page` used to be pinned to the first tab for the whole run, so any
+  // target="_blank" / window.open handoff was invisible: the agent clicked, a tab opened somewhere it
+  // could not see, the original tab did not change, and it reported a dead button. That is exactly why
+  // the Pear vault manager flow has never once been tested — `handleStartTrading` is a
+  // `window.open(v3TradeUrl, '_blank')`, so "Start Trading does nothing" has been filed as a finding
+  // more than once when the handoff was working the whole time.
+  ctx.on("page", async (p) => {
+    try {
+      await p.waitForLoadState("domcontentloaded", { timeout: 10000 }).catch(() => {});
+      p.on("console", (m) => { if (m.type() === "error" && consoleErrors.length < 400) consoleErrors.push(m.text().slice(0, 300)); });
+      p.on("pageerror", (e) => { if (pageErrors.length < 400) pageErrors.push((e.message || String(e)).slice(0, 300)); });
+      p.on("requestfailed", (r) => { if (failedRequests.length < 400) { const f = r.failure(); failedRequests.push(`${r.method()} ${r.url().slice(0, 140)} — ${f ? f.errorText : "failed"}`); } });
+      page = p;                       // subsequent snapshots/clicks act on the tab the user is now looking at
+      await p.bringToFront().catch(() => {});
+      openedTabNote = `A NEW TAB opened (${p.url().slice(0, 120)}) and you are now driving it. This is the app handing off, not a dead button. Use browser_navigate to go back if you need the previous page.`;
+    } catch {}
+  });
   // Web3 dApp QA: inject an UNFUNDED burner wallet at window.ethereum (key stays in Node, txs are NEVER
   // broadcast) plus any gate stubs, BEFORE the first navigation so wagmi/ethers see the wallet at load.
   if (process.env.WEB3_ENABLED === "1") {
@@ -169,7 +192,7 @@ async function ensurePage(): Promise<Page> {
       stubs = stubs.map((s: any) => (s && s.whitelist ? { ...s, whitelistKey: wlKey } : s));
       const allowFunded = process.env.WEB3_ALLOW_FUNDED === "1";
       const allowBroadcast = process.env.WEB3_ALLOW_BROADCAST === "1";
-      const { address } = await installWeb3(page, {
+      const { address } = await installWeb3(ctx, {
         rpcUrl: process.env.WEB3_RPC || "https://arb1.arbitrum.io/rpc",
         chainId: parseInt(process.env.WEB3_CHAIN_ID || "42161", 10),
         privateKey: process.env.WEB3_PK || undefined,
@@ -285,6 +308,14 @@ function budgetNote(): string {
   return calls >= MAX_CALLS ? "\n\n[BUDGET REACHED — call `finish` now with your verdict.]" : "";
 }
 const text = (s: string) => ({ content: [{ type: "text" as const, text: s }], details: {} });
+// Same, plus the rendered page as an image block. pi's AgentToolResult.content accepts
+// (TextContent | ImageContent)[]; ImageContent is { type:"image", data:<base64>, mimeType }.
+const textWithShot = (s: string, shotPath: string) => {
+  try {
+    const b64 = fs.readFileSync(shotPath).toString("base64");
+    return { content: [{ type: "text" as const, text: s }, { type: "image" as const, data: b64, mimeType: "image/png" }], details: {} };
+  } catch { return text(s); }   // a missing screenshot must never cost us the snapshot itself
+};
 // HARD budget gate — a soft nudge gets ignored; once the step budget is hit, action tools refuse so the
 // agent must call finish() (bounds cost + keeps each flow inside the wall-clock cap).
 const overBudgetMsg = () => text("STEP BUDGET EXHAUSTED — do NOT take more actions. Call finish() now with your verdict and a summary of what you found and what broke.");
@@ -355,7 +386,13 @@ export default function (pi: ExtensionAPI) {
       const textBlock = TEXT_MAX > 0
         ? `\nPAGE TEXT (what a user actually sees — judge rendered values from THIS, never from the ELEMENTS list, which only indexes clickable things):\n${pageText || "(no visible text)"}`
         : "";
-      return text(`URL: ${url}\nTITLE: ${title}\nELEMENTS:\n${list}${textBlock}${drainErrors()}${budgetNote()}`);
+      const tabNote = openedTabNote ? `\n${openedTabNote}\n` : "";
+      openedTabNote = "";
+      const body = `URL: ${url}\nTITLE: ${title}${tabNote}\nELEMENTS:\n${list}${textBlock}${drainErrors()}${budgetNote()}`;
+      const shotPath = path.join(OUT, shot);
+      return VISION_DRIVER && fs.existsSync(shotPath)
+        ? textWithShot(`${body}\n\nThe attached SCREENSHOT is this page as a user sees it. Judge layout, overlap, truncation, contrast, broken images, spinners and anything visually wrong from the image — the ELEMENTS list and PAGE TEXT cannot show you those.`, shotPath)
+        : text(body);
     },
   });
 

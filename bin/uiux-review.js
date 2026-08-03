@@ -61,20 +61,30 @@ async function reviewScreen(app, screen, imgPath) {
     { type: 'text', text: RUBRIC(app, screen) },
     { type: 'image_url', image_url: { url: `data:${mime};base64,${b64}` } }] }] };
   const ctrl = new AbortController(); const timer = setTimeout(() => ctrl.abort(), TIMEOUT);
-  let tokens = 0, parsed = { summary: '', findings: [] };
+  let tokens = 0, parsed = { summary: '', findings: [] }, failed = false;
   try {
     const r = await fetch(`${BASE}/chat/completions`, { method: 'POST',
       headers: { Authorization: `Bearer ${getKey()}`, 'Content-Type': 'application/json', ...EXTRA_HEADERS },
       body: JSON.stringify(body), signal: ctrl.signal });
     const d = await r.json();
     tokens = (d.usage && d.usage.total_tokens) || 0;
+    // SAY SO when the API refuses. A text-only model 404s every image request; without this the
+    // catch below never fires, parsed stays empty, and the run logs "0 finding(s), 0 tok" — which
+    // reads as "reviewed it, all clean" rather than "never ran". That hid a dead vision pass for
+    // weeks (VISION_MODEL was pointed at xiaomi/mimo-v2.5-pro, which has no image input).
+    if (!r.ok || d.error) {
+      const msg = (d.error && (d.error.message || JSON.stringify(d.error))) || `HTTP ${r.status}`;
+      throw new Error(`${MODEL} rejected the image request: ${String(msg).slice(0, 160)}`);
+    }
     const c = d.choices && d.choices[0] && d.choices[0].message && d.choices[0].message.content;
     const j = extractJson(c);
     if (j) parsed = j;
-  } catch (e) { parsed = { summary: 'review failed: ' + e.message, findings: [] }; }
+  } catch (e) { parsed = { summary: 'review failed: ' + e.message, findings: [] }; failed = true; }
   clearTimeout(timer);
   const findings = Array.isArray(parsed.findings) ? parsed.findings : [];
-  console.error(`  reviewed ${screen} — ${findings.length} finding(s), ${tokens} tok`);
+  console.error(failed
+    ? `  FAILED ${screen} — ${parsed.summary}`
+    : `  reviewed ${screen} — ${findings.length} finding(s), ${tokens} tok`);
   return { screen, screenshot: path.basename(imgPath), summary: parsed.summary || '', findings, tokens };
 }
 async function pool(items, n, fn) {

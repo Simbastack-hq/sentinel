@@ -23,7 +23,7 @@
  * burner address, so wagmi sees the burner as whitelisted.
  */
 import crypto from "node:crypto";
-import type { Page } from "playwright";
+import type { BrowserContext } from "playwright";
 
 export interface Web3Config {
   rpcUrl: string; // JSON-RPC endpoint for read proxying (e.g. https://arb1.arbitrum.io/rpc)
@@ -224,10 +224,14 @@ function providerInitScript(addr, chainHex) {
 }
 
 /**
- * Inject the unfunded burner + gate stubs into a Playwright page. Call BEFORE the first navigation.
- * Returns the burner address (safe to log/display — it's an unfunded throwaway).
+ * Inject the unfunded burner + gate stubs into a Playwright BROWSER CONTEXT. Call BEFORE the first
+ * navigation. Returns the burner address (safe to log/display — it's an unfunded throwaway).
+ *
+ * Context-scoped, not page-scoped, so EVERY tab gets the wallet — including ones the app opens itself.
+ * When this was bound to a single page, any `window.open(..., '_blank')` handoff landed on a tab with
+ * no `window.ethereum`, which is half of why Pear's vault manager flow could never be tested.
  */
-export async function installWeb3(page: Page, cfg: Web3Config, stubs: StubConfig[] = []): Promise<{ address: string }> {
+export async function installWeb3(ctx: BrowserContext, cfg: Web3Config, stubs: StubConfig[] = []): Promise<{ address: string }> {
   const { privateKeyToAccount } = await import("viem/accounts");
   const supplied = !!(cfg.privateKey && /^0x[0-9a-fA-F]{64}$/.test(cfg.privateKey));
   const pk = supplied ? (cfg.privateKey as string) : "0x" + crypto.randomBytes(32).toString("hex");
@@ -378,7 +382,7 @@ export async function installWeb3(page: Page, cfg: Web3Config, stubs: StubConfig
     throw Object.assign(new Error(`sentinel: method '${m}' is not permitted in QA (only reads + local wallet/sign methods are allowed)`), { code: -32601 });
   }
 
-  await page.exposeFunction("__sentinelWeb3", async (method: string, params: any[]) => {
+  await ctx.exposeFunction("__sentinelWeb3", async (method: string, params: any[]) => {
     try {
       return await handle(method, params);
     } catch (e: any) {
@@ -387,10 +391,10 @@ export async function installWeb3(page: Page, cfg: Web3Config, stubs: StubConfig
     }
   });
 
-  await page.addInitScript(`(${providerInitScript.toString()})(${JSON.stringify(address)}, ${JSON.stringify(chainHex)})`);
+  await ctx.addInitScript(`(${providerInitScript.toString()})(${JSON.stringify(address)}, ${JSON.stringify(chainHex)})`);
 
   for (const s of stubs) {
-    if (s.abort) { await page.route(s.url, (route) => route.abort()); continue; } // e.g. silence WalletConnect relay/explorer
+    if (s.abort) { await ctx.route(s.url, (route) => route.abort()); continue; } // e.g. silence WalletConnect relay/explorer
     let body: string;
     if (s.whitelist) {
       // Encrypt the burner into a crypto-js AES blob and splice it into the response template at the
@@ -402,14 +406,14 @@ export async function installWeb3(page: Page, cfg: Web3Config, stubs: StubConfig
     } else {
       body = JSON.stringify(s.json ?? {});
     }
-    await page.route(s.url, (route) => route.fulfill({ status: s.status || 200, contentType: "application/json", body }));
+    await ctx.route(s.url, (route) => route.fulfill({ status: s.status || 200, contentType: "application/json", body }));
   }
 
   // Proxy the app's OWN direct RPC fetches (wagmi publicClient reads) through Node: fixes browser CORS on
   // public RPCs, adds retry, and re-applies the broadcast deny-list. Without this, CORS/rate-limit errors
   // from a public RPC flood the app and break its on-chain reads (quotes/balances).
   const CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "POST, GET, OPTIONS", "access-control-allow-headers": "*", "content-type": "application/json" };
-  await page.route(cfg.rpcUrl, async (route) => {
+  await ctx.route(cfg.rpcUrl, async (route) => {
     const req = route.request();
     if (req.method() === "OPTIONS") return route.fulfill({ status: 204, headers: CORS, body: "" });
     const raw = req.postData() || "";
@@ -438,7 +442,7 @@ export async function installWeb3(page: Page, cfg: Web3Config, stubs: StubConfig
   // Best-effort: silence WalletConnect's relay WebSocket reconnect storm (a dummy projectId yields an
   // endless "Project not found" loop). We connect via the injected wallet, never WalletConnect.
   try {
-    await (page as any).routeWebSocket?.(/walletconnect/i, (ws: any) => { try { ws.close(); } catch {} });
+    await (ctx as any).routeWebSocket?.(/walletconnect/i, (ws: any) => { try { ws.close(); } catch {} });
   } catch {}
 
   return { address };
