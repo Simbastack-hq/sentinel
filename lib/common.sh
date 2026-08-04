@@ -68,6 +68,54 @@ notify_webhook(){ # content — posts to NOTIFY_WEBHOOK_URL. Dual-key payload: D
     curl -fsS -H 'Content-Type: application/json' -d @- "$NOTIFY_WEBHOOK_URL" >/dev/null 2>&1 || true
 }
 
+notify_webhook_shots(){ # content img1 [img2 img3] — Discord multipart upload: the brief WITH the
+  # screenshots the agent actually saw. Visibility ask (NJ 2026-08-05): runs were failing invisibly
+  # behind text-only briefs; attaching the last screens makes "what did the bot see" a glance, not an
+  # ssh session. Falls back to text-only if no images exist or the multipart post fails.
+  [ "${ENABLE_NOTIFY:-1}" = 1 ] || return 0
+  [ -n "${NOTIFY_WEBHOOK_URL:-}" ] || return 0
+  local content="$1"; shift
+  local args=(-fsS) n=0 f
+  for f in "$@"; do
+    [ -f "$f" ] && [ "$n" -lt 4 ] && { args+=(-F "files[$n]=@$f;type=image/png"); n=$((n+1)); }
+  done
+  if [ "$n" = 0 ]; then notify_webhook "$content"; return 0; fi
+  args+=(-F "payload_json=$(jq -n --arg c "${content:0:1900}" '{content:$c}')")
+  curl "${args[@]}" "$NOTIFY_WEBHOOK_URL" >/dev/null 2>&1 || notify_webhook "$content"
+}
+
+run_stageline(){ # rundir — one-line health of every pipeline stage, for the Discord brief. The point:
+  # a stage that died must LOOK dead in the brief. Every silent failure so far (dead triage, dead
+  # vision pass, killed verifier, crashed driver reported as "0 bugs") was invisible precisely here.
+  local rd="$1" out="" u v
+  # driver: pi-native run whose report exists but cost is empty/0 = the driver crashed mid-run
+  if grep -q "engine=pi-native" "$rd/run.log" 2>/dev/null; then
+    local cost; cost="$(jq -r '.cost // "0"' "$rd/artifacts/qa/report.json" 2>/dev/null)"
+    case "$cost" in ""|0|null) out+="⚠️driver-crashed";; *) out+="driver✓";; esac
+  fi
+  # vision: screens reviewed but zero tokens = every image call failed (the dead-Mimo pattern)
+  u="$(grep -oE 'UIUX [0-9]+ screens, [0-9]+ findings, [0-9]+ tokens' "$rd/run.log" 2>/dev/null | tail -1)"
+  if [ -n "$u" ]; then
+    local scr tok; scr="$(awk '{print $2}' <<<"$u")"; tok="$(awk '{print $6}' <<<"$u")"
+    if [ "$scr" -gt 0 ] && [ "$tok" = 0 ]; then out+=" · ⚠️vision-DEAD(0tok)"; else out+=" · vision $(awk '{print $4}' <<<"$u")f"; fi
+  fi
+  # verifier: findings existed but no verdicts arrived = gate failed closed (files nothing, silently)
+  if [ -f "$rd/verify.json" ]; then
+    v="$(jq -r '[.verdicts[]|select(.real==true)]|length' "$rd/verify.json" 2>/dev/null)"
+    out+=" · verifier ${v:-?}/$(jq -r '.verdicts|length' "$rd/verify.json" 2>/dev/null)real"
+  elif grep -q "verify_cmd:" "$rd/run.log" 2>/dev/null; then
+    out+=" · ⚠️verifier-NO-VERDICTS"
+  fi
+  # triage: file exists but empty = killed (the six-silent-nights pattern)
+  [ -f "$rd/triage.md" ] && { [ -s "$rd/triage.md" ] && out+=" · triage✓" || out+=" · ⚠️triage-EMPTY"; }
+  # money: the measured chain delta, when the oracle ran
+  if [ -f "$rd/chain-diff.md" ]; then
+    local sp; sp="$(grep -oE 'USDC spent this run: \$[0-9.]+' "$rd/chain-diff.md" | head -1)"
+    [ -n "$sp" ] && out+=" · 💸${sp##*: }" || out+=" · \$0 moved"
+  fi
+  printf '%s' "$out"
+}
+
 # ---- targets.json accessors ----
 t_field(){ jq -r --arg k "$1" --arg f "$2" '.targets[$k][$f] // empty' "$TARGETS_JSON"; }
 t_exists(){ [ -n "$(jq -r --arg k "$1" '.targets[$k] // empty' "$TARGETS_JSON" 2>/dev/null)" ]; }

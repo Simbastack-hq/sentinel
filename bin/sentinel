@@ -73,8 +73,17 @@ dispatch_run(){
     # filed this run (result.json .issue_urls — see the qa agent's issue filing).
     local issue_urls=""
     [ -f "$rd/result.json" ] && issue_urls="$(jq -r '(.issue_urls // [])[]' "$rd/result.json" 2>/dev/null | head -8)"
-    notify_webhook "$emoji **sentinel $a: $t → $verdict** — ${summary:0:300}${findings:+ • ${findings} findings}${cost:+ • \$$cost}${issue_urls:+
-$issue_urls}"
+    # Stage-health line + the last screenshots the agent saw. A dead stage must look dead HERE —
+    # every silent failure to date (empty triage, 0-token vision, killed verifier, crashed driver)
+    # was invisible in the text-only brief.
+    local stages shots=()
+    stages="$(run_stageline "$rd")"
+    if [ "$a" = qa ] && [ -d "$rd/artifacts/qa" ]; then
+      while IFS= read -r s; do shots+=("$s"); done < <(ls -1t "$rd"/artifacts/qa/step-*.png 2>/dev/null | head -3)
+    fi
+    notify_webhook_shots "$emoji **sentinel $a: $t → $verdict** — ${summary:0:280}${findings:+ • ${findings} findings}${cost:+ • \$$cost}${stages:+
+🩺 $stages}${issue_urls:+
+$issue_urls}" "${shots[@]}"
   fi
 }
 
